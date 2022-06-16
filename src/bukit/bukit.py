@@ -47,7 +47,7 @@ LOGO = """\
                                                     
 
 |                                                          |
-|__________________________________________________________|
+|__________________________________________________________|\
 """
 
 
@@ -303,7 +303,7 @@ class MakeRule:
         return s
 
 
-class NopRule(MakeRule):
+class NoRecipeRule(MakeRule):
     """
     Generate a makefile rule which has a following style:
     TARGETS: PREREQUISITES;
@@ -408,14 +408,10 @@ class Context:
     Context
     """
 
-    def __init__(self, storage):
-        self._storage = storage
+    def __init__(self):
         self._lib_map = {}
         self._name_map = {}
         self._src_map = {}
-
-    def storage(self):
-        return self._storage
 
     def get_deps(self, name):
         return self._name_map[name]
@@ -466,7 +462,7 @@ class Artifact:
         return self._name
 
     def rules(self):
-        nop_rule = NopRule(self._name, [self._rule.target()])
+        nop_rule = NoRecipeRule(self._name, [self._rule.target()])
         return [nop_rule, self._rule] + self._obj_rules
 
     def targets(self):
@@ -520,17 +516,7 @@ class Artifact:
         self._finalize()
 
     def _finalize(self):
-        pass
-
-    def save(self):
-        storage = self._ctx.storage()
-        for obj_rule in self._obj_rules:
-            storage.put_target(
-                obj_rule.target(), obj_rule.prereqs(), obj_rule.command(), True
-            )
-        rule = self._rule
-        storage.put_target(rule.target(), rule.prereqs(), rule.command(), False)
-        storage.put_artifact(self._name, rule.target())
+        raise NotImplementedError
 
 
 class LinkableFile(Artifact):
@@ -622,7 +608,8 @@ class Module:
     """
 
     def __init__(self, storage):
-        self._ctx = Context(storage)
+        self._storage = storage
+        self._ctx = Context()
         self._protoc = "protoc"
         self._protos = set()
         self._proto_srcs = []
@@ -799,13 +786,6 @@ class Module:
                 out.write(str(rule))
                 out.write("\n")
 
-    def save(self):
-        storage = self._ctx.storage()
-        storage.set_output(self._vars["output"])
-        storage.set_pbsrcs(self._proto_srcs)
-        for artifact in self._artifacts:
-            artifact.save()
-
 
 def api(module):
     """
@@ -900,50 +880,52 @@ class Storage:
     def path(self):
         return self._manifest_db["path"]
 
-    def set_output(self, output_path):
-        self._manifest_db["output_path"] = output_path
-
     def output(self):
         return self._manifest_db.get("output_path")
 
-    def set_pbsrcs(self, pbsrcs):
-        self._manifest_db["pbsrcs"] = pbsrcs
-
     def pbsrcs(self):
-        return self._manifest_db.get("pbsrcs") or ()
+        return self._manifest_db.get("pbsrcs")
 
-    def put_artifact(self, name, target):
-        self._manifest_db[name] = target
+    def get(self, name):
+        rule = self._target_db.get(name)
+        if rule:
+            _, prereqs, _ = rule
+            return prereqs[0]
 
-    def get_artifact(self, name):
-        return self._manifest_db.get(name)
-
-    def put_target(self, target, prereqs, command, is_obj):
-        self._cache[target] = (prereqs, command, is_obj)
-
-    def save(self):
-        if self._target_db:
-            self.compare()
-
+    def save(self, module: Module):
+        self._manifest_db["output_path"] = module.output()
+        self._manifest_db["pbsrcs"] = module.proto_srcs()
+        for artifact in module.artifacts():
+            for rule in artifact.rules():
+                self._cache[rule.target()] = (
+                    type(rule),
+                    rule.prereqs(),
+                    rule.command(),
+                )
+        self._purge()
         self._target_db.clear()
         self._target_db.update(self._cache)
-        self._target_db.close()
-        self._manifest_db.close()
 
-    def compare(self):
+    def _purge(self):
         delete = lambda x: os.path.exists(x) and os.remove(x)
-        # for target, (prereqs, command, _) in self._cache.items():
-        #     old_prereqs, old_command, _ = self._target_db.get(target, [None] * 3)
-        #     if prereqs != old_prereqs or command != old_command:
-        #         delete(target)
+        for target, (rule_type, prereqs, command) in self._cache.items():
+            _, old_prereqs, old_command = self._target_db.get(target, [None] * 3)
+            if rule_type != NoRecipeRule and (
+                prereqs != old_prereqs or command != old_command
+            ):
+                delete(target)
         expired_keys = set(self._target_db.keys()) - set(self._cache.keys())
         for key in expired_keys:
             delete(key)
-        for target, (prereqs, _, is_obj) in self._target_db.items():
-            if is_obj:
+        for target, (rule_type, prereqs, _) in self._target_db.items():
+            if rule_type in (NoRecipeRule, CompileRule):
                 continue
             if set(prereqs) & expired_keys:
                 delete(target)
+
+    def close(self):
+        self._target_db.close()
+        self._manifest_db.close()
 
 
 class Bukit:
@@ -959,9 +941,11 @@ class Bukit:
         return self
 
     def __exit__(self, *_):
-        self._storage.save()
+        self._storage.close()
 
     def _build(self, name=None):
+        say("-" * 60)
+
         def execute(path, globals):
             with open(path) as f:
                 code = compile(f.read(), path, "exec")
@@ -971,37 +955,46 @@ class Bukit:
         module = Module(self._storage)
         execute(os.path.join(workspace, "BUILD"), api(module))
         module.build("Makefile", name)
-        module.save()
+        self._storage.save(module)
 
     def _make(self, target):
-        target = target or "all"
-        start = time.time()
         say("-" * 60)
         cmd = "make %s" % target
         say(cmd)
         ret, _, __ = subcall(cmd, sys.stdout)
-        if ret == 0:
-            end = time.time()
-            say("make cost: %ss", int(end - start))
-        say("-" * 60)
+
+        if ret != 0:
+            sys.exit(ret)
+
+    def create(self, options):
+        tpl = Template()
+        content = tpl.format(options)
+        with open("BUILD", "w") as f:
+            f.write(content)
+        say("the `BUILD` has been generated in the current directory", color="yellow")
 
     def build(self, options):
         self._build(options.name)
-        target = "all"
         self._make(options.name or "all")
-        return target
 
     def run(self, options):
-        say("run `%s`", options.name)
-        target = self.build(options)
-        ret, _, _ = subcall(target, sys.stdout)
+        self.build(options)
+        target = self._storage.get(options.name)
+        say("-" * 60)
+        say("run %s", options.name)
+        cmd = target
+        if options.args:
+            cmd += " " + options.args
+        say(cmd, color="yellow")
+        ret, _, _ = subcall(cmd, sys.stdout)
         sys.exit(ret)
 
     def clean(self, options):
         say("clean ...")
-        if options.clean:
-            ret, _, __ = subcall("make clean", sys.stdout)
-            assert ret == 0
+        if not options.all:
+            if self._storage.output():
+                ret, _, __ = subcall("make clean", sys.stdout)
+                assert ret == 0
         else:
             if self._storage.pbsrcs():
                 for pb_name in self._storage.pbsrcs():
@@ -1017,13 +1010,6 @@ class Bukit:
                 shutil.rmtree(self._storage.output(), True)
         say("clean done")
 
-    def create(self, options):
-        tpl = Template()
-        content = tpl.format(options)
-        with open("BUILD", "w") as f:
-            f.write(content)
-        say("the `BUILD` has been generated in the current directory", color="yellow")
-
 
 def do_args(argv):
     name, args = argv[0], argv[1:]
@@ -1031,12 +1017,13 @@ def do_args(argv):
     create_parser = OptionsParser()
     create_parser.add_option("--name", help="Artifact name. eg: app", default="app")
     build_parser = OptionsParser()
-    build_parser.add_option("--name", help="Build and make ${name}")
+    build_parser.add_option("--name", help="Build and make")
     run_parser = OptionsParser()
-    run_parser.add_option("--name", help="Execute ${name}", required=True)
+    run_parser.add_option("--name", help="Execute binary file", required=True)
+    run_parser.add_option("--args", help="Pass arguments to binary file")
     clean_parser = OptionsParser()
     clean_parser.add_option(
-        "--clean", help="Only execute command: make clean", typo="bool"
+        "--all", help="Only execute command: make clean", typo="bool"
     )
     parser.add_command("create", "Create BUILD file", create_parser)
     parser.add_command("build", "Build project and generate a makefile", build_parser)
