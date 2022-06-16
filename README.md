@@ -16,6 +16,20 @@ cd bukit
 pip install .
 ```
 
+## A Simple Example
+```shell
+$ mkdir hello-world 
+$ cd hello-world
+$ bukit create
+$ mkdir src
+$ echo '#include <iostream>
+int main() {
+    std::cout << "Hello, World" << std::endl;
+    return 0;
+}' > src/main.cc
+$ bukit run --name app
+Hello, World
+```
 ## How to use
 
 ### Create
@@ -39,10 +53,18 @@ Finally, a `BUILD` file was generated and placed to current directory.
 ### Build
 Execute `Build` to build project:
 ```Shell
-bukit build
+bukit build [--name <NAME>]
 ```
 
 The `Makefile` was generated during the command is executing, and next the `make` command was automatically executed. Finally, a binary or library file was built and placed into `output` directory.
+
+### Run
+
+Execute application by specifying a name:
+```Shell
+bukit run --name <NAME>
+```
+**NOTE**: Compile application first if it hasn't been compiled yet.
 
 ### Clean
 Clean object files and others Intermediate temporary file:
