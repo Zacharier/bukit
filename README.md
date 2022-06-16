@@ -56,6 +56,8 @@ bukit build [--name <NAME>]
 
 The `Makefile` was generated during the command is executing, and next the `make` command was automatically executed. Finally, a binary or library file was built and placed into `output` directory.
 
+**NOTE**: Only build a specific artifact if `--name` was set, otherwise all artifacts will be built.
+
 ### Run
 
 Execute application by specifying a name:
