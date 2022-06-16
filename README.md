@@ -18,8 +18,6 @@ pip install .
 
 ## A Simple Example
 ```shell
-$ mkdir hello-world 
-$ cd hello-world
 $ bukit create
 $ mkdir src
 $ echo '#include <iostream>
