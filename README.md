@@ -6,14 +6,8 @@ By executing a `BUILD` file, the Bukit can deductions relationships of dependenc
 
 ## Installing
 Install and update using pip:
-```
-pip install -U git+https://github.com/Zacharier/bukit.git
-```
-or
-```
-git clone https://github.com/Zacharier/bukit.git
-cd bukit
-pip install .
+```shell
+$ pip install -U git+https://github.com/Zacharier/bukit.git
 ```
 
 ## A Simple Example
