@@ -19,16 +19,21 @@ pip install .
 ## A Simple Example
 ```shell
 $ bukit create
-$ echo '
+```
+```c++
+// save this as main.cc.
 #include <iostream>
+
 int main() {
     std::cout << "Hello, World" << std::endl;
     return 0;
 }
-' > main.cc
+```
+```shell
 $ bukit run
 Hello, World
 ```
+
 ## How to use
 
 ### Create
