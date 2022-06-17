@@ -19,13 +19,14 @@ pip install .
 ## A Simple Example
 ```shell
 $ bukit create
-$ mkdir src
-$ echo '#include <iostream>
+$ echo '
+#include <iostream>
 int main() {
     std::cout << "Hello, World" << std::endl;
     return 0;
-}' > src/main.cc
-$ bukit run --name app
+}
+' > main.cc
+$ bukit run
 Hello, World
 ```
 ## How to use
