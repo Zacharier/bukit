@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 #
 # Copyright 2022 Zacharier
 #
@@ -293,16 +293,7 @@ class MakeRule:
         return self._command
 
     def __str__(self):
-        prereqs = break_str(self._prereqs)
-        s = "%s : %s" % (self._target, prereqs)
-        if self._command:
-            commands = (
-                self._command if isinstance(self._command, list) else [self._command]
-            )
-            for command in commands:
-                command = " ".join(filter(None, self._command.split(" ")))
-                s += "\n\t%s" % command
-        return s
+        return "%s : %s\n\t%s" % (self._target, break_str(self._prereqs), self._command)
 
 
 class NoRecipeRule(MakeRule):
@@ -315,7 +306,7 @@ class NoRecipeRule(MakeRule):
         MakeRule.__init__(self, target, prereqs, None)
 
     def __str__(self):
-        return MakeRule.__str__(self) + ";"
+        return "%s : %s;" % (self._target, break_str(self._prereqs))
 
 
 class CompileRule(MakeRule):
@@ -323,16 +314,16 @@ class CompileRule(MakeRule):
     Generate a rule which compiles source file to object file.
     """
 
-    def __init__(self, name, source, prereqs, args):
-        target = os.path.join(args["output"], "objs", name, source + ".o")
-        args["target"] = target
-        args["srcs"] = source
+    def __init__(self, name, source, prereqs, kwargs):
+        target = os.path.join(kwargs["output"], "objs", name, source + ".o")
+        kwargs["target"] = target
+        kwargs["srcs"] = source
         cc_fmt = "%(ccache)s %(cc)s -o %(target)s -c %(cflags)s %(incs)s " "%(srcs)s"
         cxx_fmt = (
             "%(ccache)s %(cxx)s -o %(target)s -c %(cxxflags)s %(incs)s " "%(srcs)s"
         )
         fmt = cc_fmt if source.endswith(".c") else cxx_fmt
-        command = fmt % args
+        command = fmt % kwargs
         MakeRule.__init__(self, target, prereqs, command)
 
 
@@ -341,15 +332,17 @@ class LinkableRule(MakeRule):
     Generate a rule which links some object files.
     """
 
-    def __init__(self, name, prereqs, objs, args, test=False):
-        target = os.path.join(args["output"], "test" if test else "bin", name)
-        args["target"] = target
-        args["objs"] = break_str(objs)
-        fmt = (
-            "%(ccache)s %(cxx)s -o %(target)s %(objs)s %(ldflags)s "
-            '-Xlinker "-(" %(ldlibs)s -Xlinker "-)"'
-        )
-        command = fmt % args
+    def __init__(self, name, prereqs, objs, kwargs, test=False):
+        target = os.path.join(kwargs["output"], "test" if test else "bin", name)
+        kwargs["target"] = target
+        kwargs["objs"] = break_str(objs)
+        fmt = "%(ccache)s %(cxx)s -o %(target)s %(objs)s %(ldflags)s"
+        if kwargs.get("ldlibs"):
+            if sys.platform == "darwin":  # OS X
+                fmt += " -Xlinker %(ldlibs)s"
+            else:
+                fmt += ' -Xlinker "-(" %(ldlibs)s -Xlinker "-)"'
+        command = fmt % kwargs
         MakeRule.__init__(self, target, prereqs, command)
 
 
@@ -358,15 +351,15 @@ class SharedRule(MakeRule):
     Generate a rule which links some object files to a Shared Object file.
     """
 
-    def __init__(self, name, prereqs, objs, args):
-        target = os.path.join(args["output"], "lib", "lib%s.so" % name)
-        args["target"] = target
-        args["objs"] = break_str(objs)
+    def __init__(self, name, prereqs, objs, kwargs):
+        target = os.path.join(kwargs["output"], "lib", "lib%s.so" % name)
+        kwargs["target"] = target
+        kwargs["objs"] = break_str(objs)
         fmt = (
             "%(ccache)s %(cxx)s -o %(target)s -shared "
             '%(objs)s %(ldflags)s -Xlinker "-(" %(ldlibs)s -Xlinker "-)"'
         )
-        command = fmt % args
+        command = fmt % kwargs
         MakeRule.__init__(self, target, prereqs, command)
 
 
@@ -375,11 +368,11 @@ class StaticRule(MakeRule):
     Generate a rule which archive some object files to an archived file.
     """
 
-    def __init__(self, name, prereqs, objs, args):
-        target = os.path.join(args["output"], "lib", "lib%s.a" % name)
-        args["target"] = target
-        args["objs"] = break_str(objs)
-        command = "ar rcs %(target)s %(objs)s" % args
+    def __init__(self, name, prereqs, objs, kwargs):
+        target = os.path.join(kwargs["output"], "lib", "lib%s.a" % name)
+        kwargs["target"] = target
+        kwargs["objs"] = break_str(objs)
+        command = "ar rcs %(target)s %(objs)s" % kwargs
         MakeRule.__init__(self, target, prereqs, command)
 
 
@@ -388,8 +381,8 @@ class PrebuiltRule(MakeRule):
     Generate a rule which copy linked file to a new file.
     """
 
-    def __init__(self, name, prereqs, lib, args):
-        target = os.path.join(args["output"], "lib", os.path.basename(lib))
+    def __init__(self, name, prereqs, lib, kwargs):
+        target = os.path.join(kwargs["output"], "lib", os.path.basename(lib))
         command = "cp %s %s" % (lib, target)
         MakeRule.__init__(self, target, prereqs, command)
 
@@ -411,36 +404,33 @@ class Context:
     """
 
     def __init__(self):
-        self._lib_map = {}
-        self._name_map = {}
-        self._src_map = {}
+        self._symbol_table = {}
+        self._artifact_table = {}
+        self._cache = {}
 
-    def get_deps(self, name):
-        return self._name_map[name]
+    def is_declared(self, name):
+        return name in self._symbol_table
 
-    def is_defined(self, name):
-        return name in self._name_map
-
-    def define(self, name, deps):
+    def declare(self, name, deps):
         dep_list = list(deps)
         for dep_name in deps:
-            child_deps = self._name_map.get(dep_name)
+            child_deps = self._symbol_table.get(dep_name)
             assert child_deps is not None, "`%s` was not found" % dep_name
             dep_list.extend(child_deps)
 
-        self._name_map[name] = dep_list
+        self._symbol_table[name] = dep_list
 
-    def put_lib(self, name, target):
-        self._lib_map[name] = target
+    def deps_of(self, name):
+        return self._symbol_table[name]
 
-    def get_lib(self, name):
-        return self._lib_map.get(name)
+    def define(self, name, target):
+        self._artifact_table[name] = target
 
-    def put_prereqs(self, src, prereqs):
-        self._src_map[src] = prereqs
+    def resolve(self, name):
+        return self._artifact_table.get(name)
 
-    def get_prereqs(self, src):
-        return self._src_map.get(src)
+    def cache(self):
+        return self._cache
 
 
 class Artifact:
@@ -450,25 +440,17 @@ class Artifact:
     or a archived file(.a).
     """
 
-    def __init__(self, ctx, name, args, srcs, deps):
+    def __init__(self, ctx, name, kwargs, srcs, deps):
         self._ctx = ctx
         self._name = name
-        self._args = args
+        self._kwargs = kwargs
         self._srcs = srcs
         self._deps = deps
         self._objs = []
-        self._rule = None
         self._obj_rules = []
 
     def name(self):
         return self._name
-
-    def rules(self):
-        nop_rule = NoRecipeRule(self._name, [self._rule.target()])
-        return [nop_rule, self._rule] + self._obj_rules
-
-    def targets(self):
-        return [rule.target() for rule in [self._rule] + self._obj_rules]
 
     def _analyze(self):
         pattern = re.compile(r'^#include\s+"([^"]+)"', re.M)
@@ -486,7 +468,7 @@ class Artifact:
         def search(source):
             prereq_paths = []
             # Create a dummy of original `incs` to append.
-            incs = list(self._args.get("incs", []))
+            incs = list(self._kwargs.get("incs", []))
             seen = set()
             queue = [source]
             parent = os.path.dirname(source)
@@ -505,62 +487,54 @@ class Artifact:
         for i, source in enumerate(self._srcs):
             percent = (i + 1) * 100 / len(self._srcs)
             say("%s %d%%: analyze %s", self._name, percent, source)
-            prereqs = self._ctx.get_prereqs(source)
+            prereqs = self._ctx.cache().get(source)
             if prereqs is None:
                 prereqs = search(source)
-                self._ctx.put_prereqs(source, prereqs)
-            rule = CompileRule(self._name, source, prereqs, self._args)
+                self._ctx.cache()[source] = prereqs
+            rule = CompileRule(self._name, source, prereqs, self._kwargs)
             self._objs.append(rule.target())
             self._obj_rules.append(rule)
 
     def build(self):
         self._analyze()
-        self._finalize()
+        for dep in self._deps:
+            target = self._ctx.resolve(dep)
+            assert target, "unrecognized deps: %s" % dep
+            self._objs.append(target)
+        rule = self._finalize()
+        self._ctx.define(self._name, rule.target())
+        nop_rule = NoRecipeRule(self._name, [rule.target()])
+        return [nop_rule, rule] + self._obj_rules
 
     def _finalize(self):
         raise NotImplementedError
 
 
-class LinkableFile(Artifact):
-    """
-    Linkable libary or binary.
-    """
-
-    def build(self):
-        self._analyze()
-        for dep in self._deps:
-            target = self._ctx.get_lib(dep)
-            assert target, "unrecognized deps: %s" % dep
-            self._objs.append(target)
-        self._finalize()
-
-
-class Binary(LinkableFile):
+class Binary(Artifact):
     """
     Binary file.
     """
 
     def _finalize(self):
-        self._rule = LinkableRule(self._name, self._objs, self._objs, self._args)
+        return LinkableRule(self._name, self._objs, self._objs, self._kwargs)
 
 
-class Test(LinkableFile):
+class Test(Artifact):
     """
     Unit Test.
     """
 
     def _finalize(self):
-        self._rule = LinkableRule(self._name, self._objs, self._objs, self._args, True)
+        return LinkableRule(self._name, self._objs, self._objs, self._kwargs, True)
 
 
-class SharedLibrary(LinkableFile):
+class SharedLibrary(Artifact):
     """
     Shared Object.
     """
 
     def _finalize(self):
-        self._rule = SharedRule(self._name, self._objs, self._objs, self._args)
-        self._ctx.put_lib(self._name, self._rule.target())
+        return SharedRule(self._name, self._objs, self._objs, self._kwargs)
 
 
 class StaticLibrary(Artifact):
@@ -569,8 +543,7 @@ class StaticLibrary(Artifact):
     """
 
     def _finalize(self):
-        self._rule = StaticRule(self._name, self._objs, self._objs, self._args)
-        self._ctx.put_lib(self._name, self._rule.target())
+        return StaticRule(self._name, self._objs, self._objs, self._kwargs)
 
 
 class PrebuiltLibrary(Artifact):
@@ -578,7 +551,10 @@ class PrebuiltLibrary(Artifact):
     Prebuilt(shared) Libary
     """
 
-    def build(self):
+    def _analyze(self):
+        pass
+
+    def _finalize(self):
         def find_lib(ext):
             name, dircs = self._name, self._srcs
             for d in dircs:
@@ -591,8 +567,7 @@ class PrebuiltLibrary(Artifact):
             self._name,
             self._srcs,
         )
-        self._rule = PrebuiltRule(self._name, [lib_path], lib_path, self._args)
-        self._ctx.put_lib(self._name, self._rule.target())
+        return PrebuiltRule(self._name, [lib_path], lib_path, self._kwargs)
 
 
 def globs(args):
@@ -680,7 +655,7 @@ class Module:
     def _add_artifact(self, cls, name, srcs, deps, protos, kwargs):
         scope, srcs, deps = self._sanitize(srcs, deps, protos, kwargs)
         artifact = cls(self._ctx, name, scope, srcs, deps)
-        self._ctx.define(name, deps)
+        self._ctx.declare(name, deps)
         self._artifacts.append(artifact)
 
     def add_binary(self, name, srcs, deps, protos, kwargs):
@@ -698,14 +673,8 @@ class Module:
     def add_prebuilt(self, name, srcs, kwargs):
         self._add_artifact(PrebuiltLibrary, name, srcs, (), (), kwargs)
 
-    def artifacts(self):
-        return self._artifacts
-
-    def phonies(self):
-        return self._phonies
-
-    def build(self, makefile, name):
-        assert name is None or self._ctx.is_defined(name), "unknown name: %s" % name
+    def build(self, name, makefile):
+        assert name is None or self._ctx.is_declared(name), "unknown name: %s" % name
         for proto in self._protos:
             pbname, _ = os.path.splitext(proto)
             pbh, pbcc = pbname + ".pb.h", pbname + ".pb.cc"
@@ -730,23 +699,32 @@ class Module:
             say(cmd, color="yellow")
             subcall(cmd)
 
-        artifacts = []
+        results = []
         for artifact in self._artifacts:
-            if name is None or artifact.name() in [name] + self._ctx.get_deps(name):
-                artifact.build()
+            if name is None or artifact.name() in [name] + self._ctx.deps_of(name):
+                res = artifact.build()
                 # Collect filtered artifact by `name`.
-                artifacts.append(artifact)
-        self._artifacts = artifacts
-        self._make(makefile)
+                results.append((artifact.name(), res))
+        self._make(results, makefile)
+        return results
 
-    def _make(self, makefile):
+    def _make(self, results, makefile):
+        notices = [
+            "# file : Makefile",
+            "# brief: this file was generated by `bukit`",
+            "# date : %s" % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+        ]
+
         targets = set()
         names = []
         rules_list = []
-        for artifact in self._artifacts:
-            names.append(artifact.name())
-            rules_list.append(artifact.rules())
-            targets.update(artifact.targets())
+        for name, rules in results:
+            names.append(name)
+            rules_list.append(rules)
+            for rule in rules:
+                if not isinstance(rule, NoRecipeRule):
+                    targets.add(rule.target())
+                    os.makedirs(os.path.dirname(rule.target()), exist_ok=True)
 
         rules = []
         rules.append(MakeRule(".PHONY", self._phonies))
@@ -762,23 +740,8 @@ class Module:
         rules.append("")
         rules.append(CleanRule(sorted(targets)))
 
-        for dirc in sorted((os.path.dirname(target) for target in targets)):
-            if not os.path.exists(dirc):
-                os.makedirs(dirc)
-
-        self._write_to(rules, makefile)
-
-    def _write_to(self, rules, makefile):
-        notice = "\n".join(
-            (
-                "# file : Makefile",
-                "# brief: this file was generated by `bukit`",
-                "# date : %s" % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
-            )
-        )
-
         with open(makefile, "w") as out:
-            out.write(notice)
+            out.write("\n".join(notices))
             out.write("\n")
             out.write("\n")
             for rule in rules:
@@ -857,8 +820,8 @@ class Template:
             "",
             "binary(",
             '    name="%(name)s",',
-            '    incs=["src/"],',
-            '    srcs=["src/*.cc", "src/*.cpp"],',
+            '    incs=["./", "src/"],',
+            '    srcs=["./*.cc", "./*.cpp", "src/*.cc", "src/*.cpp"],',
             ")",
         ]
         return "\n".join(lines) % kwargs
@@ -876,26 +839,30 @@ class Storage:
         self._cache = {}
         self._target_db = shelve.open(os.path.join(path, "targets"))
 
-    def path(self):
-        return self._manifest_db["path"]
+    def proto_srcs(self):
+        return self._manifest_db.get("meta/proto_srcs")
 
     def output(self):
-        return self._manifest_db.get("output_path")
+        return self._manifest_db.get("meta/output")
 
-    def pbsrcs(self):
-        return self._manifest_db.get("pbsrcs")
+    def lookup(self, name=None):
+        if name is None:
+            return [
+                fname
+                for key, fname in self._manifest_db.items()
+                if key.startswith("artifact/")
+            ]
+        target = self._manifest_db.get("artifact/" + name)
+        return [target] if target else []
 
-    def get(self, name):
-        rule = self._target_db.get(name)
-        if rule:
-            _, prereqs, _ = rule
-            return prereqs[0]
-
-    def save(self, module: Module):
-        self._manifest_db["output_path"] = module.output()
-        self._manifest_db["pbsrcs"] = module.proto_srcs()
-        for artifact in module.artifacts():
-            for rule in artifact.rules():
+    def save(self, output, proto_srcs, results):
+        self._manifest_db["meta/output"] = output
+        self._manifest_db["meta/proto_srcs"] = proto_srcs
+        for name, rules in results:
+            for rule in rules:
+                if isinstance(rule, NoRecipeRule):
+                    name, fname = rule.target(), rule.prereqs()[0]
+                    self._manifest_db["artifact/" + name] = fname
                 self._cache[rule.target()] = (
                     type(rule),
                     rule.prereqs(),
@@ -943,7 +910,6 @@ class Bukit:
         self._storage.close()
 
     def _build(self, name=None):
-        # say("-" * 60)
         say("build...")
 
         def execute(path, globals):
@@ -954,18 +920,16 @@ class Bukit:
         workspace = os.getcwd()
         module = Module()
         execute(os.path.join(workspace, "BUILD"), api(module))
-        module.build("Makefile", name)
-        self._storage.save(module)
+        results = module.build(name, "Makefile")
+        self._storage.save(module.output(), module.proto_srcs(), results)
 
     def _make(self, target):
-        # say("-" * 60)
         say("make...")
         cmd = "make %s" % target
         say(cmd, color="yellow")
         subcall(cmd)
 
     def create(self, options):
-        # say("-" * 60)
         say("create...")
         tpl = Template()
         content = tpl.format(options)
@@ -979,17 +943,19 @@ class Bukit:
 
     def run(self, options):
         self.build(options)
-        target = self._storage.get(options.name)
-        # say("-" * 60)
+        targets = self._storage.lookup(options.name)
+        if len(targets) != 1:
+            assert options.name is not None, "a name must be specified by command args"
+            assert options.name is None, "unknown name: %s" % options.name
         say("run...")
-        cmd = target
+        cmd = targets[0]
         if options.args:
             cmd += " " + options.args
         say(cmd, color="yellow")
         subcall(cmd)
 
     def clean(self, options):
-        # say("-" * 60)
+
         say("clean...")
         workspace = os.getcwd()
         makefile = os.path.join(workspace, "Makefile")
@@ -999,16 +965,17 @@ class Bukit:
                 say(cmd, color="yellow")
                 subcall(cmd, sys.stdout)
         else:
-            if self._storage.pbsrcs():
-                for pb_name in self._storage.pbsrcs():
-                    if os.path.exists(pb_name):
-                        os.remove(pb_name)
-            meta_path = os.path.join(workspace, self._meta_path)
             if os.path.exists(makefile):
                 os.remove(makefile)
+            proto_srcs = self._storage.proto_srcs()
+            for pb_name in proto_srcs or ():
+                if os.path.exists(pb_name):
+                    os.remove(pb_name)
+            meta_path = os.path.join(workspace, self._meta_path)
             shutil.rmtree(meta_path, True)
-            if self._storage.output():
-                shutil.rmtree(self._storage.output(), True)
+            output = self._storage.output()
+            if output:
+                shutil.rmtree(output, True)
 
 
 def do_args(argv):
@@ -1019,7 +986,7 @@ def do_args(argv):
     build_parser = OptionsParser()
     build_parser.add_option("--name", help="Build and make")
     run_parser = OptionsParser()
-    run_parser.add_option("--name", help="Execute binary file", required=True)
+    run_parser.add_option("--name", help="Execute binary file")
     run_parser.add_option("--args", help="Pass arguments to binary file")
     clean_parser = OptionsParser()
     clean_parser.add_option(
