@@ -31,6 +31,7 @@ import shutil
 import sys
 import time
 import subprocess
+import codecs
 
 __version__ = "1.0.0"
 
@@ -517,7 +518,7 @@ class Artifact:
             while queue:
                 first = queue.pop(0)
                 prereq_paths.append(first)
-                with open(first) as f:
+                with codecs.open(first, encoding="utf-8") as f:
                     headers = pattern.findall(f.read())
                     new_headers = filter(lambda x: x not in seen, headers)
                     queue += expand(new_headers, incs)
@@ -764,7 +765,9 @@ class Module:
             for rule in rules:
                 if isinstance(rule, FileMakeRule):
                     targets.add(rule.target())
-                    os.makedirs(os.path.dirname(rule.target()), exist_ok=True)
+                    dirc = os.path.dirname(rule.target())
+                    if not os.path.exists(dirc):
+                        os.makedirs(dirc)
 
         rules = []
         rules.append(PhonyRule(".PHONY", self._phonies))
@@ -780,7 +783,7 @@ class Module:
         rules.append("")
         rules.append(CleanRule(sorted(targets)))
 
-        with open(makefile, "w") as out:
+        with codecs.open(makefile, "w", encoding="utf-8") as out:
             out.write("\n".join(notices))
             out.write("\n")
             out.write("\n")
@@ -952,7 +955,7 @@ class Bukit:
         say("build...")
 
         def execute(path, globals):
-            with open(path) as f:
+            with codecs.open(path, encoding="utf-8") as f:
                 code = compile(f.read(), path, "exec")
                 exec(code, globals)
 
@@ -972,7 +975,7 @@ class Bukit:
         say("create...")
         tpl = Template()
         content = tpl.format(options)
-        with open("BUILD", "w") as f:
+        with codecs.open("BUILD", "w", encoding="utf-8") as f:
             f.write(content)
         say("the `BUILD` has been generated in the current directory")
 
@@ -1014,7 +1017,6 @@ class Bukit:
                 shutil.rmtree(output, True)
             meta_path = os.path.join(workspace, self._meta_path)
             shutil.rmtree(meta_path, True)
-
 
 
 def do_args(argv):
