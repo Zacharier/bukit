@@ -834,8 +834,8 @@ class Template:
         kwargs.setdefault("name", "app")
         lines = [
             "config(",
-            '    cc="cc"',
-            '    cxx="c++"',
+            '    cc="cc",',
+            '    cxx="c++",',
             "    cflags=[",
             '        "-g",',
             '        "-O0",',
