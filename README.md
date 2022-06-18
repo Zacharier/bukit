@@ -9,13 +9,18 @@ Install and update using pip:
 ```shell
 $ pip install -U git+https://github.com/Zacharier/bukit.git
 ```
-
+or
+```shell
+git clone https://github.com/Zacharier/bukit.git
+cd bukit
+pip install .
+```
 ## A Simple Example
 ```shell
 $ bukit create
 ```
 ```c++
-// save this as main.cc.
+// save this as main.cc or any name ended with .cc/.cpp
 #include <iostream>
 
 int main() {

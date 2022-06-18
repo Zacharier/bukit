@@ -78,11 +78,18 @@ def say(fmt, *args, **kwargs):
     sys.stdout.flush()
 
 
-def break_str(prereqs):
+def break_str(s):
     """
     Break a string into multiline text.
     """
-    return " \\\n\t".join(prereqs)
+    return " \\\n\t".join(s)
+
+
+def shrink_str(s):
+    """
+    Combine multi-whitespaces in string
+    """
+    return " ".join(filter(None, s.split(" ")))
 
 
 def subcall(cmd, stdout=sys.stdout, stderr=sys.stderr, exit_on_error=True):
@@ -278,7 +285,7 @@ class MakeRule:
         COMMAND
     """
 
-    def __init__(self, target, prereqs=(), command=""):
+    def __init__(self, target, prereqs, command):
         self._target = target
         self._prereqs = prereqs
         self._command = command
@@ -293,23 +300,26 @@ class MakeRule:
         return self._command
 
     def __str__(self):
-        return "%s : %s\n\t%s" % (self._target, break_str(self._prereqs), self._command)
+        raise NotImplementedError
 
 
-class NoRecipeRule(MakeRule):
+class FileMakeRule(MakeRule):
     """
     Generate a makefile rule which has a following style:
-    TARGETS: PREREQUISITES;
+    TARGETS: PREREQUISITES
+        COMMAND
+    NOTE: The TARGETS must be a file.
     """
 
-    def __init__(self, target, prereqs):
-        MakeRule.__init__(self, target, prereqs, None)
-
     def __str__(self):
-        return "%s : %s;" % (self._target, break_str(self._prereqs))
+        return "%s : %s\n\t%s" % (
+            self._target,
+            break_str(self._prereqs),
+            shrink_str(self._command),
+        )
 
 
-class CompileRule(MakeRule):
+class CompileRule(FileMakeRule):
     """
     Generate a rule which compiles source file to object file.
     """
@@ -318,52 +328,53 @@ class CompileRule(MakeRule):
         target = os.path.join(kwargs["output"], "objs", name, source + ".o")
         kwargs["target"] = target
         kwargs["srcs"] = source
-        cc_fmt = "%(ccache)s %(cc)s -o %(target)s -c %(cflags)s %(incs)s " "%(srcs)s"
-        cxx_fmt = (
-            "%(ccache)s %(cxx)s -o %(target)s -c %(cxxflags)s %(incs)s " "%(srcs)s"
-        )
+        cc_fmt = "%(ccache)s %(cc)s -o %(target)s -c %(cflags)s %(incs)s %(srcs)s"
+        cxx_fmt = "%(ccache)s %(cxx)s -o %(target)s -c %(cxxflags)s %(incs)s %(srcs)s"
         fmt = cc_fmt if source.endswith(".c") else cxx_fmt
         command = fmt % kwargs
-        MakeRule.__init__(self, target, prereqs, command)
+        FileMakeRule.__init__(self, target, prereqs, command)
 
 
-class LinkableRule(MakeRule):
+class ElfRule(FileMakeRule):
     """
     Generate a rule which links some object files.
     """
 
-    def __init__(self, name, prereqs, objs, kwargs, test=False):
-        target = os.path.join(kwargs["output"], "test" if test else "bin", name)
+    def __init__(self, target, prereqs, objs, shared, kwargs):
         kwargs["target"] = target
         kwargs["objs"] = break_str(objs)
-        fmt = "%(ccache)s %(cxx)s -o %(target)s %(objs)s %(ldflags)s"
+        kwargs["shared"] = "-shared" if shared else ""
+        fmt = "%(ccache)s %(cxx)s %(shared)s -o %(target)s %(objs)s %(ldflags)s"
         if kwargs.get("ldlibs"):
             if sys.platform == "darwin":  # OS X
                 fmt += " -Xlinker %(ldlibs)s"
             else:
                 fmt += ' -Xlinker "-(" %(ldlibs)s -Xlinker "-)"'
         command = fmt % kwargs
-        MakeRule.__init__(self, target, prereqs, command)
+        FileMakeRule.__init__(self, target, prereqs, command)
 
 
-class SharedRule(MakeRule):
+class BinaryRule(ElfRule):
+    """
+    Generate a rule which links some object files.
+    """
+
+    def __init__(self, name, prereqs, objs, kwargs, test=False):
+        target = os.path.join(kwargs["output"], "test" if test else "bin", name)
+        ElfRule.__init__(self, target, prereqs, objs, False, kwargs)
+
+
+class SharedRule(ElfRule):
     """
     Generate a rule which links some object files to a Shared Object file.
     """
 
     def __init__(self, name, prereqs, objs, kwargs):
         target = os.path.join(kwargs["output"], "lib", "lib%s.so" % name)
-        kwargs["target"] = target
-        kwargs["objs"] = break_str(objs)
-        fmt = (
-            "%(ccache)s %(cxx)s -o %(target)s -shared "
-            '%(objs)s %(ldflags)s -Xlinker "-(" %(ldlibs)s -Xlinker "-)"'
-        )
-        command = fmt % kwargs
-        MakeRule.__init__(self, target, prereqs, command)
+        ElfRule.__init__(self, target, prereqs, objs, True, kwargs)
 
 
-class StaticRule(MakeRule):
+class StaticRule(FileMakeRule):
     """
     Generate a rule which archive some object files to an archived file.
     """
@@ -373,10 +384,10 @@ class StaticRule(MakeRule):
         kwargs["target"] = target
         kwargs["objs"] = break_str(objs)
         command = "ar rcs %(target)s %(objs)s" % kwargs
-        MakeRule.__init__(self, target, prereqs, command)
+        FileMakeRule.__init__(self, target, prereqs, command)
 
 
-class PrebuiltRule(MakeRule):
+class PrebuiltRule(FileMakeRule):
     """
     Generate a rule which copy linked file to a new file.
     """
@@ -384,18 +395,47 @@ class PrebuiltRule(MakeRule):
     def __init__(self, name, prereqs, lib, kwargs):
         target = os.path.join(kwargs["output"], "lib", os.path.basename(lib))
         command = "cp %s %s" % (lib, target)
-        MakeRule.__init__(self, target, prereqs, command)
+        FileMakeRule.__init__(self, target, prereqs, command)
 
 
-class CleanRule(MakeRule):
+class PhonyRule(MakeRule):
+    """
+    Generate a `.PHONY` rule has a following style:
+    TARGETS: PREREQUISITES
+    or:
+    TARGETS:
+        COMMANDS
+    """
+
+    def __init__(self, name, prereqs=(), command=None):
+        MakeRule.__init__(self, name, prereqs, command)
+
+    def __str__(self):
+        s = "%s : %s" % (self._target, break_str(self._prereqs))
+        if self._command:
+            s += "\n\t" + self._command
+        return s
+
+
+class NoRecipeRule(PhonyRule):
+    """
+    Generate a makefile rule which has a following style:
+    TARGETS: PREREQUISITES;
+    """
+
+    def __str__(self):
+        return PhonyRule.__str__(self) + ";"
+
+
+class CleanRule(PhonyRule):
     """
     Generate a rule which cleans all of targets generated by makefile.
     """
 
-    def __init__(self, targets):
+    def __init__(self, files):
         target = "clean"
-        command = "-rm -fr " + break_str(sorted(set(targets)))
-        MakeRule.__init__(self, target, (), command)
+        command = "-rm -fr " + break_str(sorted(set(files)))
+        PhonyRule.__init__(self, target, command=command)
 
 
 class Context:
@@ -516,7 +556,7 @@ class Binary(Artifact):
     """
 
     def _finalize(self):
-        return LinkableRule(self._name, self._objs, self._objs, self._kwargs)
+        return BinaryRule(self._name, self._objs, self._objs, self._kwargs)
 
 
 class Test(Artifact):
@@ -525,7 +565,7 @@ class Test(Artifact):
     """
 
     def _finalize(self):
-        return LinkableRule(self._name, self._objs, self._objs, self._kwargs, True)
+        return BinaryRule(self._name, self._objs, self._objs, self._kwargs, True)
 
 
 class SharedLibrary(Artifact):
@@ -593,8 +633,8 @@ class Module:
         self._phonies = ["all", "clean"]
         self._vars = self._adjust(
             {
-                "cc": "gcc",
-                "cxx": "g++",
+                "cc": "cc",
+                "cxx": "c++",
                 "protoc": "protoc",
                 "ccache": "",
                 "incs": [],
@@ -722,14 +762,14 @@ class Module:
             names.append(name)
             rules_list.append(rules)
             for rule in rules:
-                if not isinstance(rule, NoRecipeRule):
+                if isinstance(rule, FileMakeRule):
                     targets.add(rule.target())
                     os.makedirs(os.path.dirname(rule.target()), exist_ok=True)
 
         rules = []
-        rules.append(MakeRule(".PHONY", self._phonies))
+        rules.append(PhonyRule(".PHONY", self._phonies))
         rules.append("")
-        rules.append(MakeRule("all", names))
+        rules.append(PhonyRule("all", names))
 
         for r in rules_list:
             rules.append("")
@@ -794,6 +834,8 @@ class Template:
         kwargs.setdefault("name", "app")
         lines = [
             "config(",
+            '    cc="cc"',
+            '    cxx="c++"',
             "    cflags=[",
             '        "-g",',
             '        "-O0",',
@@ -845,13 +887,14 @@ class Storage:
     def output(self):
         return self._manifest_db.get("meta/output")
 
-    def lookup(self, name=None):
+    def query(self, name=None, mode=None):
         if name is None:
-            return [
-                fname
-                for key, fname in self._manifest_db.items()
-                if key.startswith("artifact/")
-            ]
+            targets = []
+            for key, fname in self._manifest_db.items():
+                if key.startswith("artifact/"):
+                    if mode is None or os.access(fname, mode):
+                        targets.append(fname)
+            return targets
         target = self._manifest_db.get("artifact/" + name)
         return [target] if target else []
 
@@ -863,30 +906,26 @@ class Storage:
                 if isinstance(rule, NoRecipeRule):
                     name, fname = rule.target(), rule.prereqs()[0]
                     self._manifest_db["artifact/" + name] = fname
-                self._cache[rule.target()] = (
-                    type(rule),
-                    rule.prereqs(),
-                    rule.command(),
-                )
+                else:
+                    self._cache[rule.target()] = rule
         self._purge()
         self._target_db.clear()
         self._target_db.update(self._cache)
 
     def _purge(self):
         delete = lambda x: os.path.exists(x) and os.remove(x)
-        for target, (rule_type, prereqs, command) in self._cache.items():
-            _, old_prereqs, old_command = self._target_db.get(target, [None] * 3)
-            if rule_type != NoRecipeRule and (
-                prereqs != old_prereqs or command != old_command
+        for target, rule in self._cache.items():
+            old_rule = self._target_db.get(target)
+            if old_rule and (
+                rule.prereqs() != old_rule.prereqs()
+                or rule.command() != old_rule.command()
             ):
                 delete(target)
         expired_keys = set(self._target_db.keys()) - set(self._cache.keys())
         for key in expired_keys:
             delete(key)
-        for target, (rule_type, prereqs, _) in self._target_db.items():
-            if rule_type in (NoRecipeRule, CompileRule):
-                continue
-            if set(prereqs) & expired_keys:
+        for target, rule in self._target_db.items():
+            if set(rule.prereqs()) & expired_keys:
                 delete(target)
 
     def close(self):
@@ -943,7 +982,7 @@ class Bukit:
 
     def run(self, options):
         self.build(options)
-        targets = self._storage.lookup(options.name)
+        targets = self._storage.query(options.name, mode=os.X_OK)
         if len(targets) != 1:
             assert options.name is not None, "a name must be specified by command args"
             assert options.name is None, "unknown name: %s" % options.name
@@ -955,7 +994,6 @@ class Bukit:
         subcall(cmd)
 
     def clean(self, options):
-
         say("clean...")
         workspace = os.getcwd()
         makefile = os.path.join(workspace, "Makefile")
@@ -971,11 +1009,12 @@ class Bukit:
             for pb_name in proto_srcs or ():
                 if os.path.exists(pb_name):
                     os.remove(pb_name)
-            meta_path = os.path.join(workspace, self._meta_path)
-            shutil.rmtree(meta_path, True)
             output = self._storage.output()
             if output:
                 shutil.rmtree(output, True)
+            meta_path = os.path.join(workspace, self._meta_path)
+            shutil.rmtree(meta_path, True)
+
 
 
 def do_args(argv):
