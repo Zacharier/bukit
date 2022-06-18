@@ -45,13 +45,15 @@ A simplest method to create a `BUILD` if you have only source file:
 echo "binary('app', ['main.cc'])" > BUILD
 ```
 
-Another method to create a `BUILD` is automatic generation from a built-in template, eg:
+Another method to create a `BUILD` is automatic generation from a built-in template:
 
 ```shell
-bukit create
+bukit create [--name <NAME>]
 ```
 
-Finally, a `BUILD` file was generated and placed to current directory.
+The `NAME` in the arguments represent the name of artifact(a binary or library) and default to `app` if `--name` was not set.
+
+After the above command is completed, a `BUILD` file was generated and placed to current directory.
 
 ### Build
 Execute `Build` to build project:
@@ -59,18 +61,22 @@ Execute `Build` to build project:
 bukit build [--name <NAME>]
 ```
 
-The `Makefile` was generated during the command is executing, and next the `make` command was automatically executed. Finally, a binary or library file was built and placed into `output` directory.
+The `Makefile` was generated during the command is executing, and next the `make` command was automatically executed. Finally, the artifacts (some binaries or libraries) were built and placed into `output` directory.
 
 **NOTE**: Only build a specific artifact if `--name` was set, otherwise all artifacts will be built.
 
 ### Run
 
-Execute application by specifying a name:
+Execute the artifact by specifying a name:
 ```Shell
-bukit run --name <NAME>
+bukit run [--name <NAME>]
 ```
-**NOTE**: Compile application first if it hasn't been compiled yet.
 
+The Bukit queries artifact by `NAME` and run it.
+
+All artifacts will be return if `--name` was not set. If there is only one executable artifact return by query, this artifact will be run. Otherwise a error will be raised because which will be run is ambiguous, in this case, a `NAME` should be specified explicitly.
+
+**NOTE**: Build first if it hasn't been built yet.
 ### Clean
 Clean object files and others Intermediate temporary file:
 
