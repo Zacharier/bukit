@@ -526,7 +526,7 @@ class Artifact:
 
         for i, source in enumerate(self._srcs):
             percent = (i + 1) * 100 / len(self._srcs)
-            say("%s %d%%: analyze %s", self._name, percent, source)
+            say("%s %3d%%: analyze %s", self._name, percent, source)
             prereqs = self._ctx.cache().get(source)
             if prereqs is None:
                 prereqs = search(source)
