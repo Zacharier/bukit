@@ -488,67 +488,74 @@ class Artifact:
         self._srcs = srcs
         self._deps = deps
         self._objs = []
-        self._obj_rules = []
 
     def name(self):
         return self._name
 
-    def _analyze(self):
-        pattern = re.compile(r'^#include\s+"([^"]+)"', re.M)
+    def _search_prereqs(self, source):
+        # Gcc include syntax:
+        # https://gcc.gnu.org/onlinedocs/cpp/Include-Syntax.html
+        # Gcc search path:
+        # https://gcc.gnu.org/onlinedocs/cpp/Search-Path.html#Search-Path
+        quote_pat = re.compile(r'^#[^\S\r\n]*include[^\S\r\n]+"([^"]+)"', re.M)
+        sys_pat = re.compile(r'^#[^\S\r\n]*include[^\S\r\n]+<([^"]+)>', re.M)
 
-        def expand(headers, incs):
-            prereq_paths = []
+        seen = set()
+
+        def search_path(headers, incs):
+            headers = [header for header in headers if header not in seen]
+            seen.update(headers)
+            paths = []
             for header in headers:
-                paths = [os.path.join(include, header) for include in incs]
-                for path in paths:
+                for inc in incs:
+                    path = os.path.join(inc, header)
                     if os.path.exists(path):
-                        prereq_paths.append(path)
+                        paths.append(path)
                         break
-            return prereq_paths
+            return paths
 
-        def search(source):
-            prereq_paths = []
-            # Create a dummy of original `incs` to append.
-            incs = list(self._kwargs.get("incs", []))
-            seen = set()
-            queue = [source]
-            parent = os.path.dirname(source)
-            if parent:
-                incs.append(parent)
-            while queue:
-                first = queue.pop(0)
-                prereq_paths.append(first)
-                with codecs.open(first, encoding="utf-8") as f:
-                    headers = pattern.findall(f.read())
-                    new_headers = filter(lambda x: x not in seen, headers)
-                    queue += expand(new_headers, incs)
-                    seen.update(new_headers)
-            return prereq_paths
+        spec_incs = self._kwargs["incs"]
+        incs = list(spec_incs)
+        queue = [source]
+        prereqs = []
+        while queue:
+            first = queue.pop(0)
+            prereqs.append(first)
+            with codecs.open(first, encoding="utf-8") as f:
+                content = f.read()
+                curr = os.path.dirname(first)
+                queue += search_path(quote_pat.findall(content), [curr] + incs)
+                queue += search_path(sys_pat.findall(content), spec_incs)
 
+        return prereqs
+
+    def _build_objs(self):
+        obj_rules = []
         for i, source in enumerate(self._srcs):
             percent = (i + 1) * 100 / len(self._srcs)
             say("%s %3d%%: analyze %s", self._name, percent, source)
             prereqs = self._ctx.cache().get(source)
             if prereqs is None:
-                prereqs = search(source)
+                prereqs = self._search_prereqs(source)
                 self._ctx.cache()[source] = prereqs
             rule = CompileRule(self._name, source, prereqs, self._kwargs)
-            self._objs.append(rule.target())
-            self._obj_rules.append(rule)
+            obj_rules.append(rule)
+        return obj_rules
+
+    def _build_out(self):
+        raise NotImplementedError
 
     def build(self):
-        self._analyze()
+        obj_rules = self._build_objs()
+        self._objs = [rule.target() for rule in obj_rules]
         for dep in self._deps:
             target = self._ctx.resolve(dep)
             assert target, "unrecognized deps: %s" % dep
             self._objs.append(target)
-        rule = self._finalize()
+        rule = self._build_out()
         self._ctx.define(self._name, rule.target())
         nop_rule = NoRecipeRule(self._name, [rule.target()])
-        return [nop_rule, rule] + self._obj_rules
-
-    def _finalize(self):
-        raise NotImplementedError
+        return [nop_rule, rule] + obj_rules
 
 
 class Binary(Artifact):
@@ -556,7 +563,7 @@ class Binary(Artifact):
     Binary file.
     """
 
-    def _finalize(self):
+    def _build_out(self):
         return BinaryRule(self._name, self._objs, self._objs, self._kwargs)
 
 
@@ -565,7 +572,7 @@ class Test(Artifact):
     Unit Test.
     """
 
-    def _finalize(self):
+    def _build_out(self):
         return BinaryRule(self._name, self._objs, self._objs, self._kwargs, True)
 
 
@@ -574,7 +581,7 @@ class SharedLibrary(Artifact):
     Shared Object.
     """
 
-    def _finalize(self):
+    def _build_out(self):
         return SharedRule(self._name, self._objs, self._objs, self._kwargs)
 
 
@@ -583,7 +590,7 @@ class StaticLibrary(Artifact):
     Static Libary
     """
 
-    def _finalize(self):
+    def _build_out(self):
         return StaticRule(self._name, self._objs, self._objs, self._kwargs)
 
 
@@ -592,10 +599,10 @@ class PrebuiltLibrary(Artifact):
     Prebuilt(shared) Libary
     """
 
-    def _analyze(self):
-        pass
+    def _build_objs(self):
+        return []
 
-    def _finalize(self):
+    def _build_out(self):
         def find_lib(ext):
             name, dircs = self._name, self._srcs
             for d in dircs:
@@ -639,9 +646,10 @@ class Module:
                 "protoc": "protoc",
                 "ccache": "",
                 "incs": [],
-                "clfags": [],
+                "cflags": [],
                 "cxxflags": [],
                 "ldflags": [],
+                # "ldlibs": []
                 "output": "output",
             }
         )
@@ -664,8 +672,6 @@ class Module:
         return self._proto_srcs
 
     def _adjust(self, kwargs):
-        if "incs" in kwargs:
-            kwargs["incs"] = Includes(globs(kwargs["incs"]))
         flags = kwargs.pop("ldflags", ())
         ldflags = Flags()
         ldlibs = LdLibs()
@@ -677,9 +683,9 @@ class Module:
                 ldlibs.append(ldflag)
         kwargs["ldlibs"] = ldlibs
         kwargs["ldflags"] = ldflags
-        for flags in ("cflags", "cxxflags"):
-            if flags in kwargs:
-                kwargs[flags] = Flags(kwargs[flags])
+        kwargs["incs"] = Includes(kwargs.get("incs", ()))
+        kwargs["cflags"] = Flags(kwargs.get("cflags", ()))
+        kwargs["cxxflags"] = Flags(kwargs.get("cxxflags", ()))
         return kwargs
 
     def _sanitize(self, srcs, deps, protos, kwargs):
