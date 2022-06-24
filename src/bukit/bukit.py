@@ -246,24 +246,6 @@ class ArgumentParser:
         return h
 
 
-class Scope(dict):
-    """
-    A extended dict.
-    """
-
-    def __init__(self, d):
-        dict.__init__(self, d)
-
-    def extend(self, parent):
-        for key, val in parent.items():
-            sub_val = self.get(key)
-            if isinstance(sub_val, list):
-                for e in val:
-                    sub_val.insert(0, e)
-            elif sub_val is None:
-                self[key] = val
-
-
 class Flags(list):
     def __str__(self):
         return " ".join(iter(self))
@@ -277,6 +259,23 @@ class LdLibs(list):
 class Includes(list):
     def __str__(self):
         return " ".join(("-I %s" % arg for arg in iter(self)))
+
+
+class Scope(dict):
+    """
+    A extended dict.
+    """
+
+    def __init__(self, d):
+        dict.__init__(self, d)
+
+    def extend(self, parent):
+        for key, val in parent.items():
+            child_val = self.get(key)
+            if isinstance(child_val, list):
+                child_val.extend(val)
+            elif child_val is None:
+                self[key] = val
 
 
 class MakeRule:
@@ -679,7 +678,10 @@ class Module:
             settings["ldlibs"] = libs
             settings["ldflags"] = flags
         if optimize is not None:
-            settings["optimize"] = "-O3" if optimize is True else "-O0"
+            if isinstance(optimize, bool):
+                settings["optimize"] = "-O3" if optimize is True else "-O0"
+            else:
+                settings["optimize"] = optimize
         if incs is not None:
             settings["incs"] = Includes(incs)
         if cflags is not None:
