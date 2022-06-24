@@ -449,7 +449,6 @@ class Context:
     def __init__(self):
         self._symbol_table = {}
         self._artifact_table = {}
-        self._cache = {}
 
     def is_declared(self, name):
         return name in self._symbol_table
@@ -471,9 +470,6 @@ class Context:
 
     def resolve(self, name):
         return self._artifact_table.get(name)
-
-    def cache(self):
-        return self._cache
 
 
 class Artifact:
@@ -637,8 +633,7 @@ class Module:
     def __init__(self):
         self._ctx = Context()
         self._protoc = "protoc"
-        self._protos = set()
-        self._proto_srcs = []
+        self._protos = {}
         self._artifacts = []
         self._phonies = ["all", "clean"]
         self._vars = {}
@@ -711,21 +706,18 @@ class Module:
     def output(self):
         return self._vars["output"]
 
-    def set_protoc(self, name_or_path):
-        self._protoc = name_or_path
-
-    def proto_srcs(self):
-        return self._proto_srcs
+    def protos(self):
+        return self._protos
 
     def _add_artifact(self, cls, name, srcs, deps, protos, kwargs):
         sources = globs(srcs)
         assert sources, "no matched files were found in: %s" % srcs
         protobufs = globs(protos)
-        pbs = [proto.replace(".proto", ".pb.cc") for proto in protobufs]
-        self._protos.update(protobufs)
+        sources.extend([proto.replace(".proto", ".pb.cc") for proto in protobufs])
+        self._protos[name] = protobufs
         scope = Scope(self._sanitize(**kwargs))
         scope.extend(self._vars)
-        artifact = cls(self._ctx, name, scope, sources + pbs, deps)
+        artifact = cls(self._ctx, name, scope, sources, deps)
         self._ctx.declare(name, deps)
         self._artifacts.append(artifact)
 
@@ -744,12 +736,10 @@ class Module:
     def add_prebuilt(self, name, srcs, kwargs):
         self._add_artifact(PrebuiltLibrary, name, srcs, (), (), kwargs)
 
-    def build(self, name, makefile):
-        assert name is None or self._ctx.is_declared(name), "unknown name: %s" % name
-        for proto in self._protos:
+    def _generate(self, protos):
+        for proto in set(protos):
             pbname, _ = os.path.splitext(proto)
             pbh, pbcc = pbname + ".pb.h", pbname + ".pb.cc"
-            self._proto_srcs += (pbh, pbcc)
             if os.path.exists(pbh) and os.path.exists(pbcc):
                 pbh_mtime = os.path.getmtime(pbh)
                 pbcc_mtime = os.path.getmtime(pbcc)
@@ -769,15 +759,6 @@ class Module:
             )
             say(cmd, color="yellow")
             subcall(cmd)
-
-        results = []
-        for artifact in self._artifacts:
-            if name is None or artifact.name() in [name] + self._ctx.deps_of(name):
-                res = artifact.build()
-                # Collect filtered artifact by `name`.
-                results.append((artifact.name(), res))
-        self._make(results, makefile)
-        return results
 
     def _make(self, results, makefile):
         notices = [
@@ -821,6 +802,26 @@ class Module:
                 out.write(str(rule))
                 out.write("\n")
 
+    def build(self, makefile, name):
+        assert name is None or self._ctx.is_declared(name), "unknown name: %s" % name
+        results = []
+        if name is None:
+            self._generate(
+                [proto for protos in self._protos.values() for proto in protos]
+            )
+            artifacts = self._artifacts
+        else:
+            self._generate(self._protos.get(name) or ())
+            names = [name] + self._ctx.deps_of(name)
+            artifacts = [
+                artifact for artifact in self._artifacts if artifact.name() in names
+            ]
+        for artifact in artifacts:
+            result = artifact.build()
+            results.append((artifact.name(), result))
+        self._make(results, makefile)
+        return results
+
 
 def api(module):
     """
@@ -837,22 +838,13 @@ def api(module):
         module.add_test(name, srcs, deps, protos, kwargs)
 
     def library(
-        name,
-        srcs=(),
-        protos=(),
-        deps=(),
-        lib="",
-        shared=False,
-        prebuilt=False,
-        **kwargs
+        name, srcs=(), protos=(), deps=(), shared=False, prebuilt=False, **kwargs
     ):
         if prebuilt:
-            assert len(srcs) == 1, "attr `srcs` size must be 1 in prebuilt library"
             module.add_prebuilt(name, srcs, kwargs)
         elif shared:
             module.add_shared(name, srcs, deps, protos, kwargs)
         else:
-            assert not deps, "attr `deps` is not supported in static library"
             module.add_static(name, srcs, protos, kwargs)
 
     return dict(locals(), **{name.upper(): func for name, func in locals().items()})
@@ -903,17 +895,28 @@ class Template:
 class Storage:
     """
     Load and store a shelve db, also compare with current cache.
+
+    mode: Optional argument *flag* can be 'r' (default) for read-only access, 'w'
+    for read-write access of an existing database, 'c' for read-write access
+    to a new or existing database,
     """
 
-    def __init__(self, path):
-        if not os.path.exists(path):
-            os.mkdir(path)
-        self._manifest_db = shelve.open(os.path.join(path, "manifest"))
-        self._cache = {}
-        self._target_db = shelve.open(os.path.join(path, "targets"))
+    def __init__(self, mode):
+        self._path = ".bukit"
+        if mode == "r" and not os.path.exists(self._path):
+            self._manifest_db = {}
+            self._target_db = {}
+        else:
+            if not os.path.exists(self._path):
+                os.mkdir(self._path)
+            self._manifest_db = shelve.open(os.path.join(self._path, "manifest"), mode)
+            self._target_db = shelve.open(os.path.join(self._path, "targets"), mode)
 
-    def proto_srcs(self):
-        return self._manifest_db.get("meta/proto_srcs")
+    def path(self):
+        return self._path
+
+    def protos(self):
+        return self._manifest_db.get("meta/protos")
 
     def output(self):
         return self._manifest_db.get("meta/output")
@@ -929,30 +932,31 @@ class Storage:
         target = self._manifest_db.get("artifact/" + name)
         return [target] if target else []
 
-    def save(self, output, proto_srcs, results):
+    def save(self, output, protos, results):
         self._manifest_db["meta/output"] = output
-        self._manifest_db["meta/proto_srcs"] = proto_srcs
+        self._manifest_db["meta/protos"] = protos
+        cache = {}
         for name, rules in results:
             for rule in rules:
                 if isinstance(rule, NoRecipeRule):
                     name, fname = rule.target(), rule.prereqs()[0]
                     self._manifest_db["artifact/" + name] = fname
                 else:
-                    self._cache[rule.target()] = rule
-        self._purge()
+                    cache[rule.target()] = rule
+        self._purge(cache)
         self._target_db.clear()
-        self._target_db.update(self._cache)
+        self._target_db.update(cache)
 
-    def _purge(self):
+    def _purge(self, cache):
         delete = lambda x: os.path.exists(x) and os.remove(x)
-        for target, rule in self._cache.items():
+        for target, rule in cache.items():
             old_rule = self._target_db.get(target)
             if old_rule and (
                 rule.prereqs() != old_rule.prereqs()
                 or rule.command() != old_rule.command()
             ):
                 delete(target)
-        expired_keys = set(self._target_db.keys()) - set(self._cache.keys())
+        expired_keys = set(self._target_db.keys()) - set(cache.keys())
         for key in expired_keys:
             delete(key)
         for target, rule in self._target_db.items():
@@ -960,8 +964,16 @@ class Storage:
                 delete(target)
 
     def close(self):
-        self._target_db.close()
-        self._manifest_db.close()
+        if not isinstance(self._target_db, dict):
+            self._target_db.close()
+        if not isinstance(self._manifest_db, dict):
+            self._manifest_db.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
 
 
 class Bukit:
@@ -970,14 +982,7 @@ class Bukit:
     """
 
     def __init__(self):
-        self._meta_path = ".bukit"
-        self._storage = Storage(self._meta_path)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_):
-        self._storage.close()
+        pass
 
     def _build(self, name=None, optimize=None):
         say("build...")
@@ -990,8 +995,9 @@ class Bukit:
         module = Module()
         module.config(optimize=optimize)
         execute("BUILD", api(module))
-        results = module.build(name, "Makefile")
-        self._storage.save(module.output(), module.proto_srcs(), results)
+        results = module.build("Makefile", name)
+        with Storage("c") as s:
+            s.save(module.output(), module.protos(), results)
 
     def _make(self, target):
         say("make...")
@@ -1013,7 +1019,8 @@ class Bukit:
 
     def run(self, options):
         self.build(options)
-        targets = self._storage.query(options.name, mode=os.X_OK)
+        with Storage("r") as s:
+            targets = s.query(options.name, mode=os.X_OK)
         if len(targets) != 1:
             assert options.name is not None, "a name must be specified by command args"
             assert options.name is None, "unknown name: %s" % options.name
@@ -1033,16 +1040,22 @@ class Bukit:
                 say(cmd, color="yellow")
                 subcall(cmd, sys.stdout)
         else:
+            with Storage("r") as s:
+                path, protos, output = s.path(), s.protos(), s.output()
+
             if os.path.exists(makefile):
                 os.remove(makefile)
-            proto_srcs = self._storage.proto_srcs()
-            for pb_name in proto_srcs or ():
-                if os.path.exists(pb_name):
-                    os.remove(pb_name)
-            output = self._storage.output()
+
+            for proto in protos or ():
+                pbname, _ = os.path.splitext(proto)
+                pbh, pbcc = pbname + ".pb.h", pbname + ".pb.cc"
+                if os.path.exists(pbh):
+                    os.remove(pbh)
+                if os.path.exists(pbcc):
+                    os.remove(pbcc)
             if output:
                 shutil.rmtree(output, True)
-            shutil.rmtree(self._meta_path, True)
+            shutil.rmtree(path, True)
 
 
 def do_args(argv):
@@ -1058,6 +1071,9 @@ def do_args(argv):
     run_parser = OptionsParser()
     run_parser.add_option("--name", help="Execute binary file")
     run_parser.add_option("--args", help="Pass arguments to binary file")
+    run_parser.add_option(
+        "--optimize", help="Build and make", typo="bool", default=False
+    )
     clean_parser = OptionsParser()
     clean_parser.add_option(
         "--all", help="Clean all files generated by Bukit", typo="bool"
@@ -1073,15 +1089,15 @@ def do_args(argv):
 def main():
     say(LOGO)
     command, options = do_args(sys.argv)
-    with Bukit() as bukit:
-        if command == "create":
-            bukit.create(options)
-        elif command == "build":
-            bukit.build(options)
-        elif command == "run":
-            bukit.run(options)
-        elif command == "clean":
-            bukit.clean(options)
+    bukit = Bukit()
+    if command == "create":
+        bukit.create(options)
+    elif command == "build":
+        bukit.build(options)
+    elif command == "run":
+        bukit.run(options)
+    elif command == "clean":
+        bukit.clean(options)
 
 
 if __name__ == "__main__":
