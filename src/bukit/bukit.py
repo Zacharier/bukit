@@ -56,7 +56,7 @@ class ArgError(IOError):
     pass
 
 
-def say(fmt, *args, **kwargs):
+def say(fmt="", *args, **kwargs):
     """
     Print a formatted message with a specified color.
     """
@@ -74,7 +74,10 @@ def say(fmt, *args, **kwargs):
     which = kwargs.get("color")
     newline = kwargs.get("nl", "\n")
     fmt = str(fmt)
-    sys.stdout.write(colors[which] + (args and fmt % args or fmt) + "\033[0m")
+    sys.stdout.write(colors[which])
+    sys.stdout.write(args and fmt % args or fmt)
+    sys.stdout.write("\033[0m")  # Erase color
+    sys.stdout.write("\033[K")  # Erase remaining characters
     sys.stdout.write(newline)
     sys.stdout.flush()
 
@@ -531,8 +534,10 @@ class Artifact:
     def _build_objs(self):
         obj_rules = []
         for i, source in enumerate(self._srcs):
-            percent = (i + 1) * 100 / len(self._srcs)
-            say("%s %3d%%: analyze %s", self._name, percent, source)
+            n = len(self._srcs)
+            percent = (i + 1) * 100 / n
+            nl = "\n" if i + 1 == n else "\r"
+            say("%s\t%3d%%: %s", self._name, percent, source, nl=nl)
             prereqs = self._search_prereqs(source)
             rule = CompileRule(self._name, source, prereqs, self._kwargs)
             obj_rules.append(rule)
