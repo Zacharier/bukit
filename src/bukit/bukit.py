@@ -260,7 +260,7 @@ class Scope(dict):
             if isinstance(sub_val, list):
                 for e in val:
                     sub_val.insert(0, e)
-            else:
+            elif sub_val is None:
                 self[key] = val
 
 
@@ -329,8 +329,8 @@ class CompileRule(FileMakeRule):
         target = os.path.join(kwargs["output"], "objs", name, source + ".o")
         kwargs["target"] = target
         kwargs["srcs"] = source
-        cc_fmt = "%(ccache)s %(cc)s -o %(target)s -c %(cflags)s %(incs)s %(srcs)s"
-        cxx_fmt = "%(ccache)s %(cxx)s -o %(target)s -c %(cxxflags)s %(incs)s %(srcs)s"
+        cc_fmt = "%(ccache)s %(cc)s -o %(target)s -c %(optimize)s %(cflags)s %(incs)s %(srcs)s"
+        cxx_fmt = "%(ccache)s %(cxx)s -o %(target)s -c %(optimize)s %(cxxflags)s %(incs)s %(srcs)s"
         fmt = cc_fmt if source.endswith(".c") else cxx_fmt
         command = fmt % kwargs
         FileMakeRule.__init__(self, target, prereqs, command)
@@ -498,7 +498,7 @@ class Artifact:
         # Gcc search path:
         # https://gcc.gnu.org/onlinedocs/cpp/Search-Path.html#Search-Path
         quote_pat = re.compile(r'^#[^\S\r\n]*include[^\S\r\n]+"([^"]+)"', re.M)
-        sys_pat = re.compile(r'^#[^\S\r\n]*include[^\S\r\n]+<([^"]+)>', re.M)
+        sys_pat = re.compile(r"^#[^\S\r\n]*include[^\S\r\n]+<([^>]+)>", re.M)
 
         seen = set()
 
@@ -534,10 +534,7 @@ class Artifact:
         for i, source in enumerate(self._srcs):
             percent = (i + 1) * 100 / len(self._srcs)
             say("%s %3d%%: analyze %s", self._name, percent, source)
-            prereqs = self._ctx.cache().get(source)
-            if prereqs is None:
-                prereqs = self._search_prereqs(source)
-                self._ctx.cache()[source] = prereqs
+            prereqs = self._search_prereqs(source)
             rule = CompileRule(self._name, source, prereqs, self._kwargs)
             obj_rules.append(rule)
         return obj_rules
@@ -613,6 +610,7 @@ class PrebuiltLibrary(Artifact):
         lib_path = find_lib(".so") or find_lib(".a")
         assert lib_path, "lib%s.so or lib%s.a was not found in: %s" % (
             self._name,
+            self._name,
             self._srcs,
         )
         return PrebuiltRule(self._name, [lib_path], lib_path, self._kwargs)
@@ -639,28 +637,69 @@ class Module:
         self._proto_srcs = []
         self._artifacts = []
         self._phonies = ["all", "clean"]
-        self._vars = self._adjust(
+        self._vars = {}
+        self.config(
             {
                 "cc": "cc",
                 "cxx": "c++",
                 "protoc": "protoc",
                 "ccache": "",
                 "incs": [],
+                "optimize": False,
                 "cflags": [],
                 "cxxflags": [],
                 "ldflags": [],
-                # "ldlibs": []
                 "output": "output",
             }
         )
 
-    def config(self, **kwargs):
-        new_vars = {}
-        for name in self._vars.keys():
-            val = kwargs.get(name)
+    def _sanitize(
+        self,
+        cc=None,
+        cxx=None,
+        protoc=None,
+        ccache=None,
+        incs=None,
+        optimize=None,
+        cflags=None,
+        cxxflags=None,
+        ldflags=None,
+        output=None,
+    ):
+        settings = {}
+        if ldflags is not None:
+            flags = Flags()
+            libs = LdLibs()
+            for ldflag in ldflags:
+                ldflag = ldflag.strip()
+                if ldflag.startswith("-") and not ldflag.startswith("-l"):
+                    flags.append(ldflag)
+                else:
+                    libs.append(ldflag)
+            settings["ldlibs"] = libs
+            settings["ldflags"] = flags
+        if optimize is not None:
+            settings["optimize"] = "-O3" if optimize is True else "-O0"
+        if incs is not None:
+            settings["incs"] = Includes(incs)
+        if cflags is not None:
+            settings["cflags"] = Flags(cflags)
+        if cxxflags is not None:
+            settings["cxxflags"] = Flags(cxxflags)
+        for name, val in [
+            ("cc", cc),
+            ("cxx", cxx),
+            ("ccache", ccache),
+            ("protoc", protoc),
+            ("output", output),
+        ]:
             if val is not None:
-                new_vars[name] = val
-        self._vars.update(self._adjust(new_vars))
+                settings[name] = val
+        return settings
+
+    def config(self, conf={}, **settings):
+        conf.update(settings)
+        self._vars.update(self._sanitize(**conf))
 
     def output(self):
         return self._vars["output"]
@@ -671,37 +710,15 @@ class Module:
     def proto_srcs(self):
         return self._proto_srcs
 
-    def _adjust(self, kwargs):
-        flags = kwargs.pop("ldflags", ())
-        ldflags = Flags()
-        ldlibs = LdLibs()
-        for ldflag in flags:
-            ldflag = ldflag.strip()
-            if ldflag.startswith("-") and not ldflag.startswith("-l"):
-                ldflags.append(ldflag)
-            else:
-                ldlibs.append(ldflag)
-        kwargs["ldlibs"] = ldlibs
-        kwargs["ldflags"] = ldflags
-        kwargs["incs"] = Includes(kwargs.get("incs", ()))
-        kwargs["cflags"] = Flags(kwargs.get("cflags", ()))
-        kwargs["cxxflags"] = Flags(kwargs.get("cxxflags", ()))
-        return kwargs
-
-    def _sanitize(self, srcs, deps, protos, kwargs):
+    def _add_artifact(self, cls, name, srcs, deps, protos, kwargs):
         sources = globs(srcs)
         assert sources, "no matched files were found in: %s" % srcs
         protobufs = globs(protos)
-        kwargs = {key: val for key, val in kwargs.items() if val}
         pbs = [proto.replace(".proto", ".pb.cc") for proto in protobufs]
         self._protos.update(protobufs)
-        scope = Scope(self._adjust(kwargs))
+        scope = Scope(self._sanitize(**kwargs))
         scope.extend(self._vars)
-        return scope, sources + pbs, deps
-
-    def _add_artifact(self, cls, name, srcs, deps, protos, kwargs):
-        scope, srcs, deps = self._sanitize(srcs, deps, protos, kwargs)
-        artifact = cls(self._ctx, name, scope, srcs, deps)
+        artifact = cls(self._ctx, name, scope, sources + pbs, deps)
         self._ctx.declare(name, deps)
         self._artifacts.append(artifact)
 
@@ -847,7 +864,6 @@ class Template:
             '    cxx="c++",',
             "    cflags=[",
             '        "-g",',
-            '        "-O0",',
             '        "-std=c11",',
             '        "-pipe",',
             '        "-W",',
@@ -857,7 +873,6 @@ class Template:
             "    ],",
             "    cxxflags=[",
             '        "-g",',
-            '        "-O0",',
             '        "-std=c++11",',
             '        "-pipe",',
             '        "-W",',
@@ -957,7 +972,7 @@ class Bukit:
     def __exit__(self, *_):
         self._storage.close()
 
-    def _build(self, name=None):
+    def _build(self, name=None, optimize=None):
         say("build...")
 
         def execute(path, globals):
@@ -966,6 +981,7 @@ class Bukit:
                 exec(code, globals)
 
         module = Module()
+        module.config(optimize=optimize)
         execute("BUILD", api(module))
         results = module.build(name, "Makefile")
         self._storage.save(module.output(), module.proto_srcs(), results)
@@ -985,7 +1001,7 @@ class Bukit:
         say("the `BUILD` has been generated in the current directory")
 
     def build(self, options):
-        self._build(options.name)
+        self._build(options.name, options.optimize)
         self._make(options.name or "all")
 
     def run(self, options):
@@ -1029,6 +1045,9 @@ def do_args(argv):
     create_parser.add_option("--name", help="Artifact name. eg: app", default="app")
     build_parser = OptionsParser()
     build_parser.add_option("--name", help="Build and make")
+    build_parser.add_option(
+        "--optimize", help="Build and make", typo="bool", default=False
+    )
     run_parser = OptionsParser()
     run_parser.add_option("--name", help="Execute binary file")
     run_parser.add_option("--args", help="Pass arguments to binary file")
