@@ -927,6 +927,11 @@ class Bukit:
 
 def do_args():
     parser = ArgsParser(add_help=True)
+    parser.add_argument(
+        "--version",
+        action="version",
+        version="%(prog)s " + __version__,
+    )
 
     subparsers = parser.add_subparsers(dest="command", help=None, title="commands")
 
