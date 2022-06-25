@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 #
 # Copyright 2022 Zacharier
 #
@@ -31,6 +31,8 @@ import shutil
 import sys
 import time
 import subprocess
+import codecs
+import argparse
 
 __version__ = "1.0.0"
 
@@ -51,11 +53,7 @@ LOGO = """\
 """
 
 
-class ArgError(IOError):
-    pass
-
-
-def say(fmt, *args, **kwargs):
+def say(fmt="", *args, **kwargs):
     """
     Print a formatted message with a specified color.
     """
@@ -73,184 +71,45 @@ def say(fmt, *args, **kwargs):
     which = kwargs.get("color")
     newline = kwargs.get("nl", "\n")
     fmt = str(fmt)
-    sys.stdout.write(colors[which] + (args and fmt % args or fmt) + "\033[0m")
+    sys.stdout.write(colors[which])
+    sys.stdout.write(args and fmt % args or fmt)
+    sys.stdout.write("\033[0m")  # Erase color
+    sys.stdout.write("\033[K")  # Erase remaining characters
     sys.stdout.write(newline)
     sys.stdout.flush()
 
 
-def break_str(prereqs):
+def break_str(s):
     """
     Break a string into multiline text.
     """
-    return " \\\n\t".join(prereqs)
+    return " \\\n\t".join(s)
 
 
-def subcall(cmd, stdout=subprocess.PIPE):
+def shrink_str(s):
+    """
+    Combine multi-whitespaces in string
+    """
+    return " ".join(filter(None, s.split(" ")))
+
+
+def subcall(cmd, stdout=sys.stdout, stderr=sys.stderr, exit_on_error=True):
     """
     Fork and execute a new command.
     """
     p = subprocess.Popen(cmd, shell=True, stdout=stdout)
     out, err = p.communicate()
     r = p.wait()
-    return r, out and out.decode('utf-8'), err and err.decode('utf-8')
+    if r != 0 and exit_on_error:
+        sys.exit(r)
+    return r, out and out.decode("utf-8"), err and err.decode("utf-8")
 
 
-class Options(dict):
-    """
-    A parsed options from command line.
-    """
-
-    def __init__(self, d=None):
-        dict.__init__(self, d)
-
-    def __getattr__(self, name):
-        try:
-            return self[name]
-        except KeyError:
-            return None
-
-
-class OptionsParser:
-    """
-    Parse command line into a options object.
-    """
-
-    def __init__(self):
-        self._args = {}
-        self._actions = {}
-        self.add_option("--help", help="Show this help", typo="bool", default=False)
-
-    def add_option(self, option, help, typo="str", required=False, default=None):
-        self._actions[option] = (typo, help, required, default)
-        if not required:
-            self._args[option[2:]] = default
-
-    def parse_args(self, argv):
-        def convert(key, s):
-            types = {
-                "str": str,
-                "int": int,
-                "float": float,
-            }
-            try:
-                return types[key](s)
-            except KeyError:
-                return None
-
-        if "--help" in argv:
-            raise ArgError()
-
-        opts = Options(self._args)
-        size = len(argv)
-        i = 0
-        while i < size:
-            arg = argv[i]
-            if arg not in self._actions:
-                raise ArgError("option %s is unrecognized" % arg)
-            typo, _, __, ___ = self._actions[arg]
-            if typo == "bool":
-                opts[arg[2:]] = True
-            else:
-                i += 1
-                if i == size:
-                    raise ArgError("option %s: too few arguments" % arg)
-                val = convert(typo, argv[i])
-                if val is None:
-                    raise ArgError("option %s: %s is required" % (arg, typo))
-                opts[arg[2:]] = val
-            i += 1
-        for option, (_, _, required, _) in self._actions.items():
-            if required and option[2:] not in opts:
-                raise ArgError("option %s is required" % option)
-        return opts
-
-    def help(self, cmd="general"):
-        s = cmd.title() + " Options:\n"
-        last = ""
-        for key, (_, help, __, ___) in self._actions.items():
-            if "--help" == key:
-                last = "  %-20s %s\n" % (key, help)
-            else:
-                s += "  %-20s %s\n" % (key, help)
-        return s + last
-
-
-class ArgumentParser:
-    """
-    Parse command and options from command line.
-    """
-
-    def __init__(self, name, version=None):
-        self._commands = []
-        self._command_map = {}
-        self._name = name
-        self._version = version
-
-        self.add_command("version", "Show version")
-        self.add_command("help", "Show help")
-
-    def usage(self, command="<command>"):
-        return "Usage:\n  %s %s [options]\n\n" % (self._name, command)
-
-    def add_command(self, command, help, option_parser=None):
-        self._commands.insert(-1, command)
-        self._command_map[command] = (help, option_parser)
-
-    def parse(self, argv):
-        if len(argv) == 0 or argv[0] == "help":
-            self.print_help(self.help())
-        if self._version and argv[0] == "version":
-            self.print_version(self._version)
-        if argv[0] not in self._command_map:
-            self.print_help(self.help(), "command %s: unrecognized" % argv[0])
-        _, parser = self._command_map[argv[0]]
-        if parser is None:
-            return argv[0], None
-        try:
-            options = parser.parse_args(argv[1:])
-            return argv[0], options
-        except ArgError as e:
-            self.print_help(self.usage(argv[0]) + parser.help(argv[0]), e)
-
-    def print_help(self, help=None, error=None, stream=sys.stdout):
-        lines = [help or self.help()]
-        if isinstance(error, ArgError):
-            error = str(error)
-        if error:
-            lines.append(error)
-        stream.write("\n".join(lines))
-        stream.write("\n")
-        sys.exit(-1 if error else 0)
-
-    def print_version(self, version):
-        sys.stdout.write(version)
-        sys.stdout.write("\n")
-        sys.exit(0)
-
-    def help(self):
-        h = self.usage()
-        h += "Commands:\n"
-        for cmd in self._commands:
-            h += "  %-10s%s\n" % (cmd, self._command_map[cmd][0])
-        return h
-
-
-class Scope(dict):
-    """
-    A extended dict.
-    """
-
-    def __init__(self, d):
-        dict.__init__(self, d)
-
-    def extend(self, parent):
-        for key, val in parent.items():
-            sub_val = self.get(key)
-            if isinstance(sub_val, list):
-                for e in val:
-                    sub_val.insert(0, e)
-            else:
-                self[key] = val
+class ArgsParser(argparse.ArgumentParser):
+    def error(self, message):
+        sys.stderr.write("%s\n" % message)
+        self.print_help()
+        sys.exit(2)
 
 
 class Flags(list):
@@ -268,6 +127,23 @@ class Includes(list):
         return " ".join(("-I %s" % arg for arg in iter(self)))
 
 
+class Scope(dict):
+    """
+    A extended dict.
+    """
+
+    def __init__(self, d):
+        dict.__init__(self, d)
+
+    def extend(self, parent):
+        for key, val in parent.items():
+            child_val = self.get(key)
+            if isinstance(child_val, list):
+                child_val.extend(val)
+            elif child_val is None:
+                self[key] = val
+
+
 class MakeRule:
     """
     Generate a makefile rule which has a following style:
@@ -275,7 +151,7 @@ class MakeRule:
         COMMAND
     """
 
-    def __init__(self, target, prereqs=(), command=""):
+    def __init__(self, target, prereqs, command):
         self._target = target
         self._prereqs = prereqs
         self._command = command
@@ -290,110 +166,175 @@ class MakeRule:
         return self._command
 
     def __str__(self):
-        prereqs = break_str(self._prereqs) if hasattr(self, "_prereqs") else ""
-        s = "%s : %s" % (self._target, prereqs)
-        if self._command:
-            commands = (
-                self._command if isinstance(self._command, list) else [self._command]
-            )
-            for command in commands:
-                command = " ".join(filter(None, self._command.split(" ")))
-                s += "\n\t%s" % command
-        return s
+        raise NotImplementedError
 
 
-class CompileRule(MakeRule):
+class FileMakeRule(MakeRule):
+    """
+    Generate a makefile rule which has a following style:
+    TARGETS: PREREQUISITES
+        COMMAND
+    NOTE: The TARGETS must be a file.
+    """
+
+    def __str__(self):
+        return "%s : %s\n\t%s" % (
+            self._target,
+            break_str(self._prereqs),
+            shrink_str(self._command),
+        )
+
+
+class CompileRule(FileMakeRule):
     """
     Generate a rule which compiles source file to object file.
     """
 
-    def __init__(self, fname, prereqs, args, artifact):
-        target = os.path.join(args["output"], "objs", artifact, fname + ".o")
-        args["target"] = target
-        args["srcs"] = fname
-        cc_fmt = "%(ccache)s %(cc)s -o %(target)s -c %(cflags)s %(incs)s " "%(srcs)s"
-        cxx_fmt = (
-            "%(ccache)s %(cxx)s -o %(target)s -c %(cxxflags)s %(incs)s " "%(srcs)s"
-        )
-        fmt = cc_fmt if fname.endswith(".c") else cxx_fmt
-        command = fmt % args
-        MakeRule.__init__(self, target, prereqs, command)
+    def __init__(self, name, source, prereqs, kwargs):
+        target = os.path.join(kwargs["output"], "objs", name, source + ".o")
+        kwargs["target"] = target
+        kwargs["srcs"] = source
+        cc_fmt = "%(ccache)s %(cc)s -o %(target)s -c %(optimize)s %(cflags)s %(incs)s %(srcs)s"
+        cxx_fmt = "%(ccache)s %(cxx)s -o %(target)s -c %(optimize)s %(cxxflags)s %(incs)s %(srcs)s"
+        fmt = cc_fmt if source.endswith(".c") else cxx_fmt
+        command = fmt % kwargs
+        FileMakeRule.__init__(self, target, prereqs, command)
 
 
-class LinkRule(MakeRule):
+class ElfRule(FileMakeRule):
     """
     Generate a rule which links some object files.
     """
 
-    def __init__(self, name, prereqs, objs, args, test=False):
-        target = os.path.join(args["output"], "test" if test else "bin", name)
-        args["target"] = target
-        args["objs"] = break_str(objs)
-        fmt = (
-            "%(ccache)s %(cxx)s -o %(target)s %(objs)s %(ldflags)s "
-            '-Xlinker "-(" %(ldlibs)s -Xlinker "-)"'
-        )
-        command = fmt % args
-        MakeRule.__init__(self, target, prereqs, command)
+    def __init__(self, target, prereqs, objs, shared, kwargs):
+        kwargs["target"] = target
+        kwargs["objs"] = break_str(objs)
+        kwargs["shared"] = "-shared" if shared else ""
+        fmt = "%(ccache)s %(cxx)s %(shared)s -o %(target)s %(objs)s %(ldflags)s"
+        if kwargs.get("ldlibs"):
+            if sys.platform == "darwin":  # OS X
+                fmt += " -Xlinker %(ldlibs)s"
+            else:
+                fmt += ' -Xlinker "-(" %(ldlibs)s -Xlinker "-)"'
+        command = fmt % kwargs
+        FileMakeRule.__init__(self, target, prereqs, command)
 
 
-class SharedRule(MakeRule):
+class BinaryRule(ElfRule):
+    """
+    Generate a rule which links some object files.
+    """
+
+    def __init__(self, name, prereqs, objs, kwargs, test=False):
+        target = os.path.join(kwargs["output"], "test" if test else "bin", name)
+        ElfRule.__init__(self, target, prereqs, objs, False, kwargs)
+
+
+class SharedRule(ElfRule):
     """
     Generate a rule which links some object files to a Shared Object file.
     """
 
-    def __init__(self, name, prereqs, objs, args):
-        target = os.path.join(args["output"], "lib", "lib%s.so" % name)
-        args["target"] = target
-        args["objs"] = break_str(objs)
-        fmt = (
-            "%(ccache)s %(cxx)s -o %(target)s -shared "
-            '%(objs)s %(ldflags)s -Xlinker "-(" %(ldlibs)s -Xlinker "-)"'
-        )
-        command = fmt % args
-        MakeRule.__init__(self, target, prereqs, command)
+    def __init__(self, name, prereqs, objs, kwargs):
+        target = os.path.join(kwargs["output"], "lib", "lib%s.so" % name)
+        ElfRule.__init__(self, target, prereqs, objs, True, kwargs)
 
 
-class StaticRule(MakeRule):
+class StaticRule(FileMakeRule):
     """
     Generate a rule which archive some object files to an archived file.
     """
 
-    def __init__(self, name, prereqs, objs, args):
-        target = os.path.join(args["output"], "lib", "lib%s.a" % name)
-        args["target"] = target
-        args["objs"] = break_str(objs)
-        command = "ar rcs %(target)s %(objs)s" % args
-        MakeRule.__init__(self, target, prereqs, command)
+    def __init__(self, name, prereqs, objs, kwargs):
+        target = os.path.join(kwargs["output"], "lib", "lib%s.a" % name)
+        kwargs["target"] = target
+        kwargs["objs"] = break_str(objs)
+        command = "ar rcs %(target)s %(objs)s" % kwargs
+        FileMakeRule.__init__(self, target, prereqs, command)
 
 
-class PrebuiltRule(MakeRule):
-    def __init__(self, name, prereqs, lib, args):
-        target = os.path.join(args["output"], "lib", os.path.basename(lib))
+class PrebuiltRule(FileMakeRule):
+    """
+    Generate a rule which copy linked file to a new file.
+    """
+
+    def __init__(self, name, prereqs, lib, kwargs):
+        target = os.path.join(kwargs["output"], "lib", os.path.basename(lib))
         command = "cp %s %s" % (lib, target)
-        MakeRule.__init__(self, target, prereqs, command)
+        FileMakeRule.__init__(self, target, prereqs, command)
 
 
-class CleanRule(MakeRule):
+class PhonyRule(MakeRule):
+    """
+    Generate a `.PHONY` rule has a following style:
+    TARGETS: PREREQUISITES
+    or:
+    TARGETS:
+        COMMANDS
+    """
+
+    def __init__(self, name, prereqs=(), command=None):
+        MakeRule.__init__(self, name, prereqs, command)
+
+    def __str__(self):
+        s = "%s : %s" % (self._target, break_str(self._prereqs))
+        if self._command:
+            s += "\n\t" + self._command
+        return s
+
+
+class NoRecipeRule(PhonyRule):
+    """
+    Generate a makefile rule which has a following style:
+    TARGETS: PREREQUISITES;
+    """
+
+    def __str__(self):
+        return PhonyRule.__str__(self) + ";"
+
+
+class CleanRule(PhonyRule):
     """
     Generate a rule which cleans all of targets generated by makefile.
     """
 
-    def __init__(self, targets):
+    def __init__(self, files):
         target = "clean"
-        command = "-rm -fr " + break_str(sorted(set(targets)))
-        MakeRule.__init__(self, target, (), command)
+        command = "-rm -fr " + break_str(sorted(set(files)))
+        PhonyRule.__init__(self, target, command=command)
 
 
 class Context:
+    """
+    Context
+    """
+
     def __init__(self):
-        self._lib_map = {}
+        self._symbol_table = {}
+        self._artifact_table = {}
 
-    def add_lib(self, name, target):
-        self._lib_map[name] = target
+    def is_declared(self, name):
+        return name in self._symbol_table
 
-    def get_lib(self, name):
-        return self._lib_map.get(name)
+    def declare(self, name, deps):
+        assert name not in self._symbol_table, "`%s` is already declared" % name
+        dep_list = list(deps)
+        for dep_name in deps:
+            child_deps = self._symbol_table.get(dep_name)
+            assert child_deps is not None, "`%s` was not found" % dep_name
+            dep_list.extend(child_deps)
+
+        self._symbol_table[name] = dep_list
+
+    def deps_of(self, name):
+        return self._symbol_table[name]
+
+    def define(self, name, target):
+        assert name not in self._artifact_table, "`%s` is already defined" % name
+        self._artifact_table[name] = target
+
+    def resolve(self, name):
+        return self._artifact_table.get(name)
 
 
 class Artifact:
@@ -403,113 +344,107 @@ class Artifact:
     or a archived file(.a).
     """
 
-    def __init__(self, ctx, name, args, srcs, deps):
+    def __init__(self, ctx, name, kwargs, srcs, deps):
         self._ctx = ctx
         self._name = name
-        self._args = args
+        self._kwargs = kwargs
         self._srcs = srcs
         self._deps = deps
         self._objs = []
-        self._rule = None
-        self._sub_rules = []
 
     def name(self):
         return self._name
 
-    def rule(self):
-        return self._rule
+    def _search_prereqs(self, source):
+        # Gcc include syntax:
+        # https://gcc.gnu.org/onlinedocs/cpp/Include-Syntax.html
+        # Gcc search path:
+        # https://gcc.gnu.org/onlinedocs/cpp/Search-Path.html#Search-Path
+        quote_pat = re.compile(r'^#[^\S\r\n]*include[^\S\r\n]+"([^"]+)"', re.M)
+        sys_pat = re.compile(r"^#[^\S\r\n]*include[^\S\r\n]+<([^>]+)>", re.M)
 
-    def obj_rules(self):
-        return self._sub_rules
+        seen = set()
 
-    def _analyze(self):
-        pattern = re.compile(r'^#include\s+"([^"]+)"', re.M)
-
-        def expand(headers, incs):
-            prereq_paths = []
+        def search_path(headers, incs):
+            headers = [header for header in headers if header not in seen]
+            seen.update(headers)
+            paths = []
             for header in headers:
-                paths = [os.path.join(include, header) for include in incs]
-                for path in paths:
+                for inc in incs:
+                    path = os.path.join(inc, header)
                     if os.path.exists(path):
-                        prereq_paths.append(path)
+                        paths.append(path)
                         break
-            return prereq_paths
+            return paths
 
-        def search(source):
-            prereq_paths = []
-            # Create a dummy of original `incs` to append.
-            incs = list(self._args.get("incs", []))
-            seen = set()
-            queue = [source]
-            parent = os.path.dirname(source)
-            if parent:
-                incs.append(parent)
-            while queue:
-                first = queue.pop(0)
-                prereq_paths.append(first)
-                with open(first) as f:
-                    headers = pattern.findall(f.read())
-                    new_headers = filter(lambda x: x not in seen, headers)
-                    queue += expand(new_headers, incs)
-                    seen.update(new_headers)
-            return prereq_paths
+        spec_incs = self._kwargs["incs"]
+        incs = list(spec_incs)
+        queue = [source]
+        prereqs = []
+        while queue:
+            first = queue.pop(0)
+            prereqs.append(first)
+            with codecs.open(first, encoding="utf-8") as f:
+                content = f.read()
+                curr = os.path.dirname(first)
+                queue += search_path(quote_pat.findall(content), [curr] + incs)
+                queue += search_path(sys_pat.findall(content), spec_incs)
 
-        fmt = "[%%%dd/%%d] analyze %%s" % len(str(len(self._srcs)))
+        return prereqs
+
+    def _build_objs(self):
+        obj_rules = []
         for i, source in enumerate(self._srcs):
-            say(fmt, i + 1, len(self._srcs), source)
-            prereqs = search(source)
-            rule = CompileRule(source, prereqs, self._args, self._name)
-            self._objs.append(rule.target())
-            self._sub_rules.append(rule)
+            n = len(self._srcs)
+            percent = (i + 1) * 100 / n
+            nl = "\n" if i + 1 == n else "\r"
+            say("%s\t%3d%%: %s", self._name, percent, source, nl=nl)
+            prereqs = self._search_prereqs(source)
+            rule = CompileRule(self._name, source, prereqs, self._kwargs)
+            obj_rules.append(rule)
+        return obj_rules
+
+    def _build_out(self):
+        raise NotImplementedError
 
     def build(self):
-        self._analyze()
-        self._finalize()
-
-    def _finalize(self):
-        pass
-
-
-class LinkableFile(Artifact):
-    """
-    Linkable libary or binary.
-    """
-
-    def build(self):
-        self._analyze()
+        obj_rules = self._build_objs()
+        self._objs = [rule.target() for rule in obj_rules]
         for dep in self._deps:
-            target = self._ctx.get_lib(dep)
+            target = self._ctx.resolve(dep)
             assert target, "unrecognized deps: %s" % dep
             self._objs.append(target)
-        self._finalize()
+        rule = self._build_out()
+        self._ctx.define(self._name, rule.target())
+        nop_rule = NoRecipeRule(self._name, [rule.target()])
+        return [nop_rule, rule] + obj_rules
 
 
-class Binary(LinkableFile):
+class Binary(Artifact):
     """
     Binary file.
     """
 
-    def _finalize(self):
-        self._rule = LinkRule(self._name, self._objs, self._objs, self._args)
+    def _build_out(self):
+        return BinaryRule(self._name, self._objs, self._objs, self._kwargs)
 
 
-class Test(LinkableFile):
+class Test(Artifact):
     """
     Unit Test.
     """
 
-    def _finalize(self):
-        self._rule = LinkRule(self._name, self._objs, self._objs, self._args, True)
+    def _build_out(self):
+        return BinaryRule(self._name, self._objs, self._objs, self._kwargs, True)
 
 
-class SharedLibrary(LinkableFile):
+class SharedLibrary(Artifact):
     """
     Shared Object.
     """
 
-    def _finalize(self):
-        self._rule = SharedRule(self._name, self._objs, self._objs, self._args)
-        self._ctx.add_lib(self._name, self._rule.target())
+    def _build_out(self):
+        return SharedRule(self._name, self._objs, self._objs, self._kwargs)
 
 
 class StaticLibrary(Artifact):
@@ -517,9 +452,8 @@ class StaticLibrary(Artifact):
     Static Libary
     """
 
-    def _finalize(self):
-        self._rule = StaticRule(self._name, self._objs, self._objs, self._args)
-        self._ctx.add_lib(self._name, self._rule.target())
+    def _build_out(self):
+        return StaticRule(self._name, self._objs, self._objs, self._kwargs)
 
 
 class PrebuiltLibrary(Artifact):
@@ -527,7 +461,10 @@ class PrebuiltLibrary(Artifact):
     Prebuilt(shared) Libary
     """
 
-    def build(self):
+    def _build_objs(self):
+        return []
+
+    def _build_out(self):
         def find_lib(ext):
             name, dircs = self._name, self._srcs
             for d in dircs:
@@ -538,13 +475,10 @@ class PrebuiltLibrary(Artifact):
         lib_path = find_lib(".so") or find_lib(".a")
         assert lib_path, "lib%s.so or lib%s.a was not found in: %s" % (
             self._name,
+            self._name,
             self._srcs,
         )
-        if lib_path.endswith(".so"):
-            self._rule = PrebuiltRule(self._name, [lib_path], lib_path, self._args)
-            self._ctx.add_lib(self._name, self._rule.target())
-        else:
-            self._ctx.add_lib(self._name, lib_path)
+        return PrebuiltRule(self._name, [lib_path], lib_path, self._kwargs)
 
 
 def globs(args):
@@ -563,75 +497,88 @@ class Module:
 
     def __init__(self):
         self._ctx = Context()
-        self._protoc = "protoc"
-        self._protos = set()
-        self._proto_srcs = []
+        self._protos = {}
         self._artifacts = []
         self._phonies = ["all", "clean"]
-        self._vars = self._adjust(
-            {
-                "cc": "gcc",
-                "cxx": "g++",
-                "protoc": "protoc",
-                "ccache": "",
+        self._vars = {}
+        self.config(
+            cc="cc",
+            cxx="c++",
+            protoc="protoc",
+            ccache="",
+            output="output",
+            **{
                 "incs": [],
-                "clfags": [],
+                "optimize": False,
+                "cflags": [],
                 "cxxflags": [],
                 "ldflags": [],
-                "output": "output",
             }
         )
 
-    def config(self, **kwargs):
-        new_vars = {}
-        for name in self._vars.keys():
-            val = kwargs.get(name)
+    def _sanitize(
+        self,
+        incs=None,
+        optimize=None,
+        cflags=None,
+        cxxflags=None,
+        ldflags=None,
+    ):
+        settings = {}
+        if ldflags is not None:
+            flags = Flags()
+            libs = LdLibs()
+            for ldflag in ldflags:
+                ldflag = ldflag.strip()
+                if ldflag.startswith("-") and not ldflag.startswith("-l"):
+                    flags.append(ldflag)
+                else:
+                    libs.append(ldflag)
+            settings["ldlibs"] = libs
+            settings["ldflags"] = flags
+        if optimize is not None:
+            if isinstance(optimize, bool):
+                settings["optimize"] = "-O3" if optimize is True else "-O0"
+            else:
+                settings["optimize"] = optimize
+        if incs is not None:
+            settings["incs"] = Includes(incs)
+        if cflags is not None:
+            settings["cflags"] = Flags(cflags)
+        if cxxflags is not None:
+            settings["cxxflags"] = Flags(cxxflags)
+        return settings
+
+    def config(
+        self, cc=None, cxx=None, protoc=None, ccache=None, output=None, **settings
+    ):
+        for name, val in [
+            ("cc", cc),
+            ("cxx", cxx),
+            ("ccache", ccache),
+            ("protoc", protoc),
+            ("output", output),
+        ]:
             if val is not None:
-                new_vars[name] = val
-        self._vars.update(self._adjust(new_vars))
+                self._vars[name] = val
+        self._vars.update(self._sanitize(**settings))
 
     def output(self):
         return self._vars["output"]
 
-    def set_protoc(self, name_or_path):
-        self._protoc = name_or_path
+    def protoc(self):
+        return self._vars["protoc"]
 
-    def proto_srcs(self):
-        return self._proto_srcs
-
-    def _adjust(self, kwargs):
-        if "incs" in kwargs:
-            kwargs["incs"] = Includes(globs(kwargs["incs"]))
-        flags = kwargs.pop("ldflags", ())
-        ldflags = Flags()
-        ldlibs = LdLibs()
-        for ldflag in flags:
-            ldflag = ldflag.strip()
-            if ldflag.startswith("-") and not ldflag.startswith("-l"):
-                ldflags.append(ldflag)
-            else:
-                ldlibs.append(ldflag)
-        kwargs["ldlibs"] = ldlibs
-        kwargs["ldflags"] = ldflags
-        for flags in ("cflags", "cxxflags"):
-            if flags in kwargs:
-                kwargs[flags] = Flags(kwargs[flags])
-        return kwargs
-
-    def _sanitize(self, srcs, deps, protos, kwargs):
+    def _add_artifact(self, cls, name, srcs, deps, protos, kwargs):
         sources = globs(srcs)
         assert sources, "no matched files were found in: %s" % srcs
         protobufs = globs(protos)
-        kwargs = {key: val for key, val in kwargs.items() if val}
-        pbs = [proto.replace(".proto", ".pb.cc") for proto in protobufs]
-        self._protos.update(protobufs)
-        scope = Scope(self._adjust(kwargs))
+        sources.extend([proto.replace(".proto", ".pb.cc") for proto in protobufs])
+        self._protos[name] = protobufs
+        scope = Scope(self._sanitize(**kwargs))
         scope.extend(self._vars)
-        return scope, sources + pbs, deps
-
-    def _add_artifact(self, cls, name, srcs, deps, protos, kwargs):
-        scope, srcs, deps = self._sanitize(srcs, deps, protos, kwargs)
-        artifact = cls(self._ctx, name, scope, srcs, deps)
+        artifact = cls(self._ctx, name, scope, sources, deps)
+        self._ctx.declare(name, deps)
         self._artifacts.append(artifact)
 
     def add_binary(self, name, srcs, deps, protos, kwargs):
@@ -649,17 +596,10 @@ class Module:
     def add_prebuilt(self, name, srcs, kwargs):
         self._add_artifact(PrebuiltLibrary, name, srcs, (), (), kwargs)
 
-    def artifacts(self):
-        return self._artifacts
-
-    def phonies(self):
-        return self._phonies
-
-    def build(self, makefile):
-        for proto in self._protos:
+    def _generate(self, protos):
+        for proto in set(protos):
             pbname, _ = os.path.splitext(proto)
             pbh, pbcc = pbname + ".pb.h", pbname + ".pb.cc"
-            self._proto_srcs += (pbh, pbcc)
             if os.path.exists(pbh) and os.path.exists(pbcc):
                 pbh_mtime = os.path.getmtime(pbh)
                 pbcc_mtime = os.path.getmtime(pbcc)
@@ -667,77 +607,80 @@ class Module:
                 if pbh_mtime > proto_mtime and pbcc_mtime > proto_mtime:
                     continue
 
-            proto_dirs = set([os.path.dirname(path) for path in self._protos])
+            proto_dirs = set([os.path.dirname(path) for path in protos])
             proto_paths = " ".join(
                 ["--proto_path " + proto_dir for proto_dir in proto_dirs]
             )
-            command = "%s %s --cpp_out=%s %s" % (
-                self._protoc,
+            cmd = "%s %s --cpp_out=%s %s" % (
+                self.protoc(),
                 proto_paths,
                 os.path.dirname(proto),
                 proto,
             )
-            say(command)
-            ret, _, __ = subcall(command, sys.stdout)
-            assert ret == 0
+            say(cmd, color="yellow")
+            subcall(cmd)
 
-        for artifact in self._artifacts:
-            say("artifact: %s", artifact.name())
-            artifact.build()
-            say("-" * 60)
+    def _make(self, rules_table, makefile):
+        notices = [
+            "# file : Makefile",
+            "# brief: this file was generated by `bukit`",
+            "# date : %s" % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+        ]
 
-        self._make(makefile)
-
-    def _make(self, makefile):
         targets = set()
-        art_rules = []
-        obj_rules = []
-        for artifact in self._artifacts:
-            for obj_rule in artifact.obj_rules():
-                obj_rules.append(obj_rule)
-                targets.add(obj_rule.target())
-            rule = artifact.rule()
-            if rule:
-                art_rules.append(rule)
-                targets.add(rule.target())
+        names = []
+        rules_list = []
+        for name, rules in rules_table.items():
+            names.append(name)
+            rules_list.append(rules)
+            for rule in rules:
+                if isinstance(rule, FileMakeRule):
+                    targets.add(rule.target())
+                    dirc = os.path.dirname(rule.target())
+                    if not os.path.exists(dirc):
+                        os.makedirs(dirc)
 
         rules = []
-        rules.append(MakeRule(".PHONY", self._phonies))
+        rules.append(PhonyRule(".PHONY", self._phonies))
         rules.append("")
-        rules.append(MakeRule("all", [product.target() for product in art_rules]))
-        rules.append("")
-        rules.append("")
-        rules.extend(art_rules)
-        rules.append("")
-        rules.extend(obj_rules)
+        rules.append(PhonyRule("all", names))
+
+        for r in rules_list:
+            rules.append("")
+            rules.append("")
+            rules.extend(r)
+
         rules.append("")
         rules.append("")
         rules.append(CleanRule(sorted(targets)))
 
-        self._make_env(targets)
-        self._write_to(rules, makefile)
-
-    def _make_env(self, targets):
-        for dirc in sorted((os.path.dirname(target) for target in targets)):
-            if not os.path.exists(dirc):
-                os.makedirs(dirc)
-
-    def _write_to(self, rules, makefile):
-        notice = "\n".join(
-            (
-                "# file : Makefile",
-                "# brief: this file was generated by `bukit`",
-                "# date : %s" % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
-            )
-        )
-
-        with open(makefile, "w") as out:
-            out.write(notice)
+        with codecs.open(makefile, "w", encoding="utf-8") as out:
+            out.write("\n".join(notices))
             out.write("\n")
             out.write("\n")
             for rule in rules:
                 out.write(str(rule))
                 out.write("\n")
+
+    def build(self, makefile, name):
+        assert name is None or self._ctx.is_declared(name), "unknown name: %s" % name
+        if name is None:
+            protos = [proto for protos in self._protos.values() for proto in protos]
+            self._generate(protos)
+            artifacts = self._artifacts
+        else:
+            protos = self._protos.get(name) or []
+            self._generate(protos)
+            names = [name] + self._ctx.deps_of(name)
+            artifacts = [
+                artifact for artifact in self._artifacts if artifact.name() in names
+            ]
+        rules_table = {}
+        for artifact in artifacts:
+            result = artifact.build()
+            rules_table[artifact.name()] = result
+        self._make(rules_table, makefile)
+        return protos, rules_table
 
 
 def api(module):
@@ -755,22 +698,13 @@ def api(module):
         module.add_test(name, srcs, deps, protos, kwargs)
 
     def library(
-        name,
-        srcs=(),
-        protos=(),
-        deps=(),
-        lib="",
-        shared=False,
-        prebuilt=False,
-        **kwargs
+        name, srcs=(), protos=(), deps=(), shared=False, prebuilt=False, **kwargs
     ):
         if prebuilt:
-            assert len(srcs) == 1, "attr `srcs` size must be 1 in prebuilt library"
             module.add_prebuilt(name, srcs, kwargs)
         elif shared:
             module.add_shared(name, srcs, deps, protos, kwargs)
         else:
-            assert not deps, "attr `deps` is not supported in static library"
             module.add_static(name, srcs, protos, kwargs)
 
     return dict(locals(), **{name.upper(): func for name, func in locals().items()})
@@ -785,9 +719,10 @@ class Template:
         kwargs.setdefault("name", "app")
         lines = [
             "config(",
+            '    cc="cc",',
+            '    cxx="c++",',
             "    cflags=[",
             '        "-g",',
-            '        "-O0",',
             '        "-std=c11",',
             '        "-pipe",',
             '        "-W",',
@@ -797,7 +732,6 @@ class Template:
             "    ],",
             "    cxxflags=[",
             '        "-g",',
-            '        "-O0",',
             '        "-std=c++11",',
             '        "-pipe",',
             '        "-W",',
@@ -811,8 +745,8 @@ class Template:
             "",
             "binary(",
             '    name="%(name)s",',
-            '    incs=["src/"],',
-            '    srcs=["src/*.cc", "src/*.cpp"],',
+            '    incs=["./", "src/"],',
+            '    srcs=["./*.cc", "./*.cpp", "src/*.cc", "src/*.cpp"],',
             ")",
         ]
         return "\n".join(lines) % kwargs
@@ -821,56 +755,90 @@ class Template:
 class Storage:
     """
     Load and store a shelve db, also compare with current cache.
+
+    mode: Optional argument *flag* can be 'r' (default) for read-only access, 'w'
+    for read-write access of an existing database, 'c' for read-write access
+    to a new or existing database,
     """
 
-    def __init__(self, path):
-        if not os.path.exists(path):
-            os.mkdir(path)
-        self._manifest_db = shelve.open(os.path.join(path, "manifest"))
-        self._cache = {}
-        self._target_db = shelve.open(os.path.join(path, "targets"))
+    def __init__(self, mode):
+        self._path = ".bukit"
+        if mode == "r" and not os.path.exists(self._path):
+            self._manifest_db = {}
+            self._target_db = {}
+        else:
+            if not os.path.exists(self._path):
+                os.mkdir(self._path)
+            self._manifest_db = shelve.open(os.path.join(self._path, "manifest"), mode)
+            self._target_db = shelve.open(os.path.join(self._path, "targets"), mode)
 
     def path(self):
-        return self._manifest_db["path"]
+        return self._path
 
-    def set_output(self, output_path):
-        self._manifest_db["output_path"] = output_path
+    def protos(self):
+        return self._manifest_db.get("meta/protos")
 
     def output(self):
-        return self._manifest_db.get("output_path")
+        return self._manifest_db.get("meta/output")
 
-    def set_pbsrcs(self, pbsrcs):
-        self._manifest_db["pbsrcs"] = pbsrcs
+    def query(self, name=None, mode=None):
+        if name is None:
+            targets = []
+            for key, fname in self._manifest_db.items():
+                if key.startswith("artifact/"):
+                    if mode is None or os.access(fname, mode):
+                        targets.append(fname)
+            return targets
+        target = self._manifest_db.get("artifact/" + name)
+        return [target] if target else []
 
-    def pbsrcs(self):
-        return self._manifest_db.get("pbsrcs") or ()
-
-    def set_target(self, target, prereqs, command, is_obj):
-        self._cache[target] = (prereqs, command, is_obj)
-
-    def save(self):
-        if self._target_db:
-            self.compare()
-
+    def save(self, output, protos, rules_table):
+        cache = {}
+        for name, rs in rules_table.items():
+            for r in rs:
+                if isinstance(r, NoRecipeRule):
+                    name, fname = r.target(), r.prereqs()[0]
+                    self._manifest_db["artifact/" + name] = fname
+                else:
+                    cache[r.target()] = r
+        self._purge(cache, protos)
         self._target_db.clear()
-        self._target_db.update(self._cache)
-        self._target_db.close()
-        self._manifest_db.close()
+        self._target_db.update(cache)
+        self._manifest_db["meta/protos"] = protos
+        self._manifest_db["meta/output"] = output
 
-    def compare(self):
+    def _purge(self, cache, protos):
         delete = lambda x: os.path.exists(x) and os.remove(x)
-        for target, (prereqs, command, _) in self._cache.items():
-            old_prereqs, old_command, _ = self._target_db.get(target, [None] * 3)
-            if prereqs != old_prereqs or command != old_command:
+        for target, rule in cache.items():
+            old_rule = self._target_db.get(target)
+            if old_rule and (
+                rule.prereqs() != old_rule.prereqs()
+                or rule.command() != old_rule.command()
+            ):
                 delete(target)
-        expired_keys = set(self._target_db.keys()) - set(self._cache.keys())
+        expired_keys = set(self._target_db.keys()) - set(cache.keys())
         for key in expired_keys:
             delete(key)
-        for target, (prereqs, _, is_obj) in self._target_db.items():
-            if is_obj:
-                continue
-            if set(prereqs) & expired_keys:
+        for target, rule in self._target_db.items():
+            if set(rule.prereqs()) & expired_keys:
                 delete(target)
+        for proto in set(self.protos() or ()) - set(protos):
+            pbname, _ = os.path.splitext(proto)
+            pbh, pbcc = pbname + ".pb.h", pbname + ".pb.cc"
+            delete(pbh)
+            delete(pbcc)
+
+    def close(self):
+        if not isinstance(self._target_db, dict):
+            self._target_db.close()
+        if not isinstance(self._manifest_db, dict):
+            self._manifest_db.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
 
 
 class Bukit:
@@ -879,121 +847,154 @@ class Bukit:
     """
 
     def __init__(self):
-        self._meta_path = ".bukit"
-        self._storage = Storage(self._meta_path)
+        pass
 
-    def _write_lines(self, fname, lines):
-        with open(fname, "w") as f:
-            for line in lines:
-                f.write(line)
-                f.write("\n")
-
-    def _save(self, artifacts, pbsrcs, output_path):
-        storage = self._storage
-        storage.set_output(output_path)
-        storage.set_pbsrcs(pbsrcs)
-        for artifact in artifacts:
-            for obj_rule in artifact.obj_rules():
-                storage.set_target(
-                    obj_rule.target(), obj_rule.prereqs(), obj_rule.command(), True
-                )
-            rule = artifact.rule()
-            if rule:
-                storage.set_target(rule.target(), rule.prereqs(), rule.command(), False)
-        storage.save()
-
-    def build(self, options):
-        say("=" * 60)
-        start = time.time()
+    def _build(self, name=None, optimize=None):
+        say("build...")
 
         def execute(path, globals):
-            with open(path) as f:
+            with codecs.open(path, encoding="utf-8") as f:
                 code = compile(f.read(), path, "exec")
                 exec(code, globals)
 
-        workspace = os.getcwd()
         module = Module()
-        execute(os.path.join(workspace, "BUILD"), api(module))
-        module.build("Makefile")
-        self._save(module.artifacts(), module.proto_srcs(), module.output())
+        module.config(optimize=optimize)
+        execute("BUILD", api(module))
+        protos, rules_table = module.build("Makefile", name)
+        with Storage("c") as s:
+            s.save(module.output(), protos, rules_table)
 
-        end = time.time()
-        say("build file   : Makefile")
-        say("build output : %s", os.path.join(module.output(), ""))
-        say("build date   : %s", time.strftime("%Y-%m-%d %X", time.localtime()))
-        say("build cost   : %ss", int(end - start))
-        if options.target:
-            start = time.time()
-            say("-" * 60)
-            cmd = "make %s" % options.target
-            say(cmd)
-            ret, _, __ = subcall(cmd, sys.stdout)
-            if ret == 0:
-                end = time.time()
-                say("make cost: %ss", int(end - start))
-        else:
-            say(
-                "\nplease execute the `make` command to make this project.",
-                color="yellow",
-            )
-        say("-" * 60)
-
-    def clean(self, options):
-        say("clean ...")
-        if options.clean:
-            ret, _, __ = subcall("make clean", sys.stdout)
-            assert ret == 0
-        else:
-            if self._storage.pbsrcs():
-                for pb_name in self._storage.pbsrcs():
-                    if os.path.exists(pb_name):
-                        os.remove(pb_name)
-            workspace = os.getcwd()
-            makefile_path = os.path.join(workspace, "Makefile")
-            meta_path = os.path.join(workspace, self._meta_path)
-            if os.path.exists(makefile_path):
-                os.remove(makefile_path)
-            shutil.rmtree(meta_path, True)
-            if self._storage.output():
-                shutil.rmtree(self._storage.output(), True)
-        say("clean done")
+    def _make(self, target, jobs=None):
+        say("make...")
+        cmd = "make %s" % target
+        if jobs is not None:
+            cmd += " -j %s" % jobs
+        say(cmd, color="yellow")
+        subcall(cmd)
 
     def create(self, options):
+        say("create...")
         tpl = Template()
         content = tpl.format(options)
-        with open("BUILD", "w") as f:
+        with codecs.open("BUILD", "w", encoding="utf-8") as f:
             f.write(content)
-        say("the `BUILD` has been generated in the current directory", color="yellow")
+        say("the `BUILD` has been generated in the current directory")
+
+    def build(self, options):
+        self._build(options.name, options.optimize)
+        self._make(options.name or "all", options.jobs)
+
+    def run(self, options):
+        self.build(options)
+        with Storage("r") as s:
+            targets = s.query(options.name, mode=os.X_OK)
+        if len(targets) != 1:
+            assert options.name is not None, "a name must be specified by command args"
+            assert options.name is None, "unknown name: %s" % options.name
+        say("run...")
+        cmd = targets[0]
+        if options.args:
+            cmd += " " + options.args
+        say(cmd, color="yellow")
+        subcall(cmd)
+
+    def clean(self, options):
+        say("clean...")
+        makefile = "Makefile"
+        if not options.all:
+            if os.path.exists(makefile):
+                cmd = "make clean"
+                say(cmd, color="yellow")
+                subcall(cmd, sys.stdout)
+        else:
+            with Storage("r") as s:
+                path, protos, output = s.path(), s.protos(), s.output()
+
+            if os.path.exists(makefile):
+                os.remove(makefile)
+
+            for proto in protos or ():
+                pbname, _ = os.path.splitext(proto)
+                pbh, pbcc = pbname + ".pb.h", pbname + ".pb.cc"
+                if os.path.exists(pbh):
+                    os.remove(pbh)
+                if os.path.exists(pbcc):
+                    os.remove(pbcc)
+            if output:
+                shutil.rmtree(output, True)
+            shutil.rmtree(path, True)
 
 
-def do_args(argv):
-    name, args = argv[0], argv[1:]
-    parser = ArgumentParser(os.path.basename(name), version=__version__)
-    create_parser = OptionsParser()
-    create_parser.add_option("--name", help="Artifact name. eg: app", default="app")
-    build_parser = OptionsParser()
-    build_parser.add_option("--target", help="Build and make ${target}", default="all")
-    clean_parser = OptionsParser()
-    clean_parser.add_option(
-        "--clean", help="Only execute command: make clean", typo="bool"
+def do_args():
+    parser = ArgsParser(add_help=True)
+    parser.add_argument(
+        "--version",
+        action="version",
+        version="%(prog)s " + __version__,
     )
-    parser.add_command("create", "Create BUILD file", create_parser)
-    parser.add_command("build", "Build project and generate a makefile", build_parser)
-    parser.add_command("clean", "Clean this project", clean_parser)
-    command, options = parser.parse(args)
-    return command, options
+
+    subparsers = parser.add_subparsers(dest="command", help=None, title="commands")
+
+    parser_create = subparsers.add_parser("create", help="create BUILD")
+    parser_build = subparsers.add_parser("build", help="build project")
+    parser_run = subparsers.add_parser("run", help="run project")
+    parser_clean = subparsers.add_parser("clean", help="clean project")
+    for sub_parser in (parser_create, parser_build, parser_run):
+        sub_parser.add_argument(
+            "--name",
+            type=str,
+            default="app",
+            required=False,
+            help="artifact name. eg: app",
+        )
+        if sub_parser in (parser_build, parser_run):
+            sub_parser.add_argument(
+                "--optimize",
+                default=False,
+                action="store_true",
+                help="enable '-O3' optimization level, default: False",
+            )
+            sub_parser.add_argument(
+                "--jobs",
+                type=int,
+                default=None,
+                required=False,
+                help="parallel make project",
+            )
+
+    parser_run.add_argument(
+        "--args",
+        type=str,
+        default="",
+        required=False,
+        help="pass command line args to executable",
+    )
+
+    parser_clean.add_argument(
+        "--all",
+        action="store_true",
+        default=False,
+        help="clean all files generated by Bukit",
+    )
+
+    if len(sys.argv) == 1:
+        parser.print_help(sys.stderr)
+        sys.exit(1)
+    return parser.parse_args()
 
 
 def main():
     say(LOGO)
-    command, options = do_args(sys.argv)
+    args = do_args()
     bukit = Bukit()
-    if command == "create":
-        bukit.create(options)
-    elif command == "build":
-        bukit.build(options)
-    elif command == "clean":
-        bukit.clean(options)
+    if args.command == "create":
+        bukit.create(args)
+    elif args.command == "build":
+        bukit.build(args)
+    elif args.command == "run":
+        bukit.run(args)
+    elif args.command == "clean":
+        bukit.clean(args)
 
 
 if __name__ == "__main__":
