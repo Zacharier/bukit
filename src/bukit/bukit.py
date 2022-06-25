@@ -32,6 +32,7 @@ import sys
 import time
 import subprocess
 import codecs
+import argparse
 
 __version__ = "1.0.0"
 
@@ -50,10 +51,6 @@ LOGO = """\
 |                                                          |
 |__________________________________________________________|
 """
-
-
-class ArgError(IOError):
-    pass
 
 
 def say(fmt="", *args, **kwargs):
@@ -108,145 +105,11 @@ def subcall(cmd, stdout=sys.stdout, stderr=sys.stderr, exit_on_error=True):
     return r, out and out.decode("utf-8"), err and err.decode("utf-8")
 
 
-class Options(dict):
-    """
-    A parsed options from command line.
-    """
-
-    def __init__(self, d=None, **extra):
-        d = d or {}
-        dict.__init__(self, d, **extra)
-
-    def __getattr__(self, name):
-        try:
-            return self[name]
-        except KeyError:
-            return None
-
-
-class OptionsParser:
-    """
-    Parse command line into a options object.
-    """
-
-    def __init__(self):
-        self._args = {}
-        self._actions = {}
-        self.add_option("--help", help="Show this help", typo="bool", default=False)
-
-    def add_option(self, option, help, typo="str", required=False, default=None):
-        self._actions[option] = (typo, help, required, default)
-        if not required:
-            self._args[option[2:]] = default
-
-    def parse_args(self, argv):
-        def convert(key, s):
-            types = {
-                "str": str,
-                "int": int,
-                "float": float,
-            }
-            try:
-                return types[key](s)
-            except KeyError:
-                return None
-
-        if "--help" in argv:
-            raise ArgError()
-
-        opts = Options(self._args)
-        size = len(argv)
-        i = 0
-        while i < size:
-            arg = argv[i]
-            if arg not in self._actions:
-                raise ArgError("option %s is unrecognized" % arg)
-            typo, _, __, ___ = self._actions[arg]
-            if typo == "bool":
-                opts[arg[2:]] = True
-            else:
-                i += 1
-                if i == size:
-                    raise ArgError("option %s: too few arguments" % arg)
-                val = convert(typo, argv[i])
-                if val is None:
-                    raise ArgError("option %s: %s is required" % (arg, typo))
-                opts[arg[2:]] = val
-            i += 1
-        for option, (_, _, required, _) in self._actions.items():
-            if required and option[2:] not in opts:
-                raise ArgError("option %s is required" % option)
-        return opts
-
-    def help(self, cmd="general"):
-        s = cmd.title() + " Options:\n"
-        last = ""
-        for key, (_, help, __, ___) in self._actions.items():
-            if "--help" == key:
-                last = "  %-20s %s\n" % (key, help)
-            else:
-                s += "  %-20s %s\n" % (key, help)
-        return s + last
-
-
-class ArgumentParser:
-    """
-    Parse command and options from command line.
-    """
-
-    def __init__(self, name, version=None):
-        self._commands = []
-        self._command_map = {}
-        self._name = name
-        self._version = version
-
-        self.add_command("version", "Show version")
-        self.add_command("help", "Show help")
-
-    def usage(self, command="<command>"):
-        return "Usage:\n  %s %s [options]\n\n" % (self._name, command)
-
-    def add_command(self, command, help, option_parser=None):
-        self._commands.insert(-1, command)
-        self._command_map[command] = (help, option_parser)
-
-    def parse(self, argv):
-        if len(argv) == 0 or argv[0] == "help":
-            self.print_help(self.help())
-        if self._version and argv[0] == "version":
-            self.print_version(self._version)
-        if argv[0] not in self._command_map:
-            self.print_help(self.help(), "command %s: unrecognized" % argv[0])
-        _, parser = self._command_map[argv[0]]
-        if parser is None:
-            return argv[0], None
-        try:
-            options = parser.parse_args(argv[1:])
-            return argv[0], options
-        except ArgError as e:
-            self.print_help(self.usage(argv[0]) + parser.help(argv[0]), e)
-
-    def print_help(self, help=None, error=None, stream=sys.stdout):
-        lines = [help or self.help()]
-        if isinstance(error, ArgError):
-            error = str(error)
-        if error:
-            lines.append(error)
-        stream.write("\n".join(lines))
-        stream.write("\n")
-        sys.exit(-1 if error else 0)
-
-    def print_version(self, version):
-        sys.stdout.write(version)
-        sys.stdout.write("\n")
-        sys.exit(0)
-
-    def help(self):
-        h = self.usage()
-        h += "Commands:\n"
-        for cmd in self._commands:
-            h += "  %-10s%s\n" % (cmd, self._command_map[cmd][0])
-        return h
+class ArgsParser(argparse.ArgumentParser):
+    def error(self, message):
+        sys.stderr.write("%s\n" % message)
+        self.print_help()
+        sys.exit(2)
 
 
 class Flags(list):
@@ -1001,9 +864,11 @@ class Bukit:
         with Storage("c") as s:
             s.save(module.output(), protos, rules_table)
 
-    def _make(self, target):
+    def _make(self, target, jobs=None):
         say("make...")
         cmd = "make %s" % target
+        if jobs is not None:
+            cmd += " -j %s" % jobs
         say(cmd, color="yellow")
         subcall(cmd)
 
@@ -1017,7 +882,7 @@ class Bukit:
 
     def build(self, options):
         self._build(options.name, options.optimize)
-        self._make(options.name or "all")
+        self._make(options.name or "all", options.jobs)
 
     def run(self, options):
         self.build(options)
@@ -1060,46 +925,71 @@ class Bukit:
             shutil.rmtree(path, True)
 
 
-def do_args(argv):
-    name, args = argv[0], argv[1:]
-    parser = ArgumentParser(os.path.basename(name), version=__version__)
-    create_parser = OptionsParser()
-    create_parser.add_option("--name", help="Artifact name. eg: app", default="app")
-    build_parser = OptionsParser()
-    build_parser.add_option("--name", help="Build and make")
-    build_parser.add_option(
-        "--optimize", help="Build and make", typo="bool", default=False
+def do_args():
+    parser = ArgsParser(add_help=True)
+
+    subparsers = parser.add_subparsers(dest="command", help=None, title="commands")
+
+    parser_create = subparsers.add_parser("create", help="create BUILD")
+    parser_build = subparsers.add_parser("build", help="build project")
+    parser_run = subparsers.add_parser("run", help="run project")
+    parser_clean = subparsers.add_parser("clean", help="clean project")
+    for sub_parser in (parser_create, parser_build, parser_run):
+        sub_parser.add_argument(
+            "--name",
+            type=str,
+            default="app",
+            required=False,
+            help="artifact name. eg: app",
+        )
+        if sub_parser in (parser_build, parser_run):
+            sub_parser.add_argument(
+                "--optimize",
+                default=False,
+                action="store_true",
+                help="enable '-O3' optimization level, default: False",
+            )
+            sub_parser.add_argument(
+                "--jobs",
+                type=int,
+                default=None,
+                required=False,
+                help="parallel make project",
+            )
+
+    parser_run.add_argument(
+        "--args",
+        type=str,
+        default="",
+        required=False,
+        help="pass command line args to executable",
     )
-    run_parser = OptionsParser()
-    run_parser.add_option("--name", help="Execute binary file")
-    run_parser.add_option("--args", help="Pass arguments to binary file")
-    run_parser.add_option(
-        "--optimize", help="Build and make", typo="bool", default=False
+
+    parser_clean.add_argument(
+        "--all",
+        action="store_true",
+        default=False,
+        help="clean all files generated by Bukit",
     )
-    clean_parser = OptionsParser()
-    clean_parser.add_option(
-        "--all", help="Clean all files generated by Bukit", typo="bool"
-    )
-    parser.add_command("create", "Create BUILD", create_parser)
-    parser.add_command("build", "Build project", build_parser)
-    parser.add_command("run", "Run project", run_parser)
-    parser.add_command("clean", "Clean project", clean_parser)
-    command, options = parser.parse(args)
-    return command, options
+
+    if len(sys.argv) == 1:
+        parser.print_help(sys.stderr)
+        sys.exit(1)
+    return parser.parse_args()
 
 
 def main():
     say(LOGO)
-    command, options = do_args(sys.argv)
+    args = do_args()
     bukit = Bukit()
-    if command == "create":
-        bukit.create(options)
-    elif command == "build":
-        bukit.build(options)
-    elif command == "run":
-        bukit.run(options)
-    elif command == "clean":
-        bukit.clean(options)
+    if args.command == "create":
+        bukit.create(args)
+    elif args.command == "build":
+        bukit.build(args)
+    elif args.command == "run":
+        bukit.run(args)
+    elif args.command == "clean":
+        bukit.clean(args)
 
 
 if __name__ == "__main__":
