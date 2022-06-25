@@ -715,8 +715,7 @@ class Template:
     Build Template which generates a BUILD file.
     """
 
-    def format(self, kwargs):
-        kwargs.setdefault("name", "app")
+    def format(self, name):
         lines = [
             "config(",
             '    cc="cc",',
@@ -744,24 +743,23 @@ class Template:
             "",
             "",
             "binary(",
-            '    name="%(name)s",',
+            '    name="%s",',
             '    incs=["./", "src/"],',
             '    srcs=["./*.cc", "./*.cpp", "src/*.cc", "src/*.cpp"],',
             ")",
         ]
-        return "\n".join(lines) % kwargs
+        return "\n".join(lines) % name
 
 
 class Storage:
     """
     Load and store a shelve db, also compare with current cache.
 
-    mode: Optional argument *flag* can be 'r' (default) for read-only access, 'w'
-    for read-write access of an existing database, 'c' for read-write access
-    to a new or existing database,
+    mode: 'r' (default) for read-only access, 'w' for read-write access of an
+    existing database, 'c' for read-write access to a new or existing database.
     """
 
-    def __init__(self, mode):
+    def __init__(self, mode="r"):
         self._path = ".bukit"
         if mode == "r" and not os.path.exists(self._path):
             self._manifest_db = {}
@@ -875,7 +873,7 @@ class Bukit:
     def create(self, options):
         say("create...")
         tpl = Template()
-        content = tpl.format(options)
+        content = tpl.format(options.name)
         with codecs.open("BUILD", "w", encoding="utf-8") as f:
             f.write(content)
         say("the `BUILD` has been generated in the current directory")
@@ -928,6 +926,7 @@ class Bukit:
 def do_args():
     parser = ArgsParser(add_help=True)
     parser.add_argument(
+        "-v",
         "--version",
         action="version",
         version="%(prog)s " + __version__,
