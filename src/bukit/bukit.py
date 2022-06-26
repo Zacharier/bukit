@@ -199,7 +199,7 @@ class Scope(dict):
         return "<Scope " + dict.__repr__(self) + ">"
 
 
-class MakeRule:
+class MakeRule(object):
     """
     Generate a makefile rule which has a following style:
     TARGETS: PREREQUISITES (; COMMAND)
@@ -375,7 +375,7 @@ class PrebuiltRule(FileMakeRule):
         FileMakeRule.__init__(self, target, [lib], command)
 
 
-class Context:
+class Context(object):
     """
     Context
     """
@@ -408,7 +408,7 @@ class Context:
         return self._artifact_table.get(name)
 
 
-class Artifact:
+class Artifact(object):
     """
     An abstract class which produces a snippet of makefile. In which
     a snippet can makes a executable file(.out) or a shared object(.so)
@@ -553,7 +553,7 @@ class PrebuiltLibrary(Artifact):
         return PrebuiltRule(lib_path, self._kwargs)
 
 
-class Module:
+class Module(object):
     """
     Module represents a builder which builds a Makefile file.
     """
@@ -769,7 +769,7 @@ def api(module):
     return dict(locals(), **{name.upper(): func for name, func in locals().items()})
 
 
-class Template:
+class Template(object):
     """
     Build Template which generates a BUILD file.
     """
@@ -810,7 +810,7 @@ class Template:
         return "\n".join(lines) % name
 
 
-class Storage:
+class Storage(object):
     """
     Load and store a shelve db, also compare with current cache.
 
@@ -896,7 +896,7 @@ class Storage:
         self.close()
 
 
-class Bukit:
+class Bukit(object):
     """
     Collect all of rules and generate a makefile file.
     """
