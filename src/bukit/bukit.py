@@ -93,6 +93,28 @@ def shrink_str(s):
     return " ".join(filter(None, s.split(" ")))
 
 
+def globs(args):
+    """
+    Glob all files and flatten to list.
+    """
+    srcs = []
+    for path in args:
+        if path.startswith("~/"):
+            path = os.path.expanduser(path)
+        srcs += glob.glob(path)
+    return srcs
+
+
+def remove_file(f):
+    """
+    Remove a file if exists.
+    """
+    if os.path.exists(f):
+        os.remove(f)
+        return True
+    return False
+
+
 def subcall(cmd, stdout=sys.stdout, stderr=sys.stderr, exit_on_error=True):
     """
     Fork and execute a new command.
@@ -234,9 +256,10 @@ class CompileRule(FileMakeRule):
         target = os.path.join(kwargs["output"], "objs", name, source + ".o")
         kwargs["target"] = target
         kwargs["srcs"] = source
-        cc_fmt = "%(ccache)s %(cc)s -o %(target)s -c %(optimize)s %(cflags)s %(incs)s %(srcs)s"
-        cxx_fmt = "%(ccache)s %(cxx)s -o %(target)s -c %(optimize)s %(cxxflags)s %(incs)s %(srcs)s"
-        fmt = cc_fmt if source.endswith(".c") else cxx_fmt
+        if source.endswith(".c"):
+            fmt = "%(ccache)s %(cc)s -o %(target)s -c %(optimize)s %(cflags)s %(incs)s %(srcs)s"
+        else:
+            fmt = "%(ccache)s %(cxx)s -o %(target)s -c %(optimize)s %(cxxflags)s %(incs)s %(srcs)s"
         command = fmt % kwargs
         FileMakeRule.__init__(self, target, prereqs, command)
 
@@ -478,9 +501,9 @@ class PrebuiltLibrary(Artifact):
 
     def _build_out(self):
         def find_lib(ext):
-            name, dircs = self._name, self._srcs
-            for d in dircs:
-                path = os.path.join(d, "lib%s%s" % (name, ext))
+            lib_name = "lib%s%s" % (self._name, ext)
+            for d in self._srcs:
+                path = os.path.join(d, lib_name)
                 if os.path.exists(path):
                     return path
 
@@ -490,16 +513,7 @@ class PrebuiltLibrary(Artifact):
             self._name,
             self._srcs,
         )
-        return PrebuiltRule(self._name, lib_path, self._kwargs)
-
-
-def globs(args):
-    srcs = []
-    for path in args:
-        if path.startswith("~/"):
-            path = os.path.expanduser(path)
-        srcs += glob.glob(path)
-    return srcs
+        return PrebuiltRule(lib_path, self._kwargs)
 
 
 class Module:
@@ -545,16 +559,25 @@ class Module:
             else:
                 settings["optimize"] = optimize
         if incs is not None:
-            print(incs)
             settings["incs"] = Includes(incs)
         if cflags is not None:
             settings["cflags"] = Flags(cflags)
         if cxxflags is not None:
             settings["cxxflags"] = Flags(cxxflags)
         if ldflags is not None:
-            settings["ldflags"] = Flags(ldflags)
+            flags = Flags()
+            libs = LdLibs()
+            for ldflag in ldflags:
+                ldflag = ldflag.strip()
+                if ldflag.startswith("-") and not ldflag.startswith("-l"):
+                    flags.append(ldflag)
+                else:
+                    libs.append(ldflag)
+            settings["ldflags"] = flags
+            if libs:
+                settings["ldlibs"] = libs
         if ldlibs is not None:
-            settings["ldlibs"] = LdLibs(ldlibs)
+            settings["ldlibs"] = LdLibs(ldlibs + settings.get("lidlibs", []))
         return settings
 
     def config(
@@ -687,8 +710,8 @@ class Module:
             ]
         rules_table = {}
         for artifact in artifacts:
-            result = artifact.build()
-            rules_table[artifact.name()] = result
+            rules = artifact.build()
+            rules_table[artifact.name()] = rules
         self._make(rules_table, makefile)
         return protos, rules_table
 
@@ -816,25 +839,23 @@ class Storage:
         self._manifest_db["meta/output"] = output
 
     def _purge(self, cache, protos):
-        delete = lambda x: os.path.exists(x) and os.remove(x)
         for target, rule in cache.items():
             old_rule = self._target_db.get(target)
             if old_rule and (
                 rule.prereqs() != old_rule.prereqs()
                 or rule.command() != old_rule.command()
             ):
-                delete(target)
+                remove_file(target)
         expired_keys = set(self._target_db.keys()) - set(cache.keys())
         for key in expired_keys:
-            delete(key)
+            remove_file(key)
         for target, rule in self._target_db.items():
             if set(rule.prereqs()) & expired_keys:
-                delete(target)
+                remove_file(target)
         for proto in set(self.protos() or ()) - set(protos):
             pbname, _ = os.path.splitext(proto)
-            pbh, pbcc = pbname + ".pb.h", pbname + ".pb.cc"
-            delete(pbh)
-            delete(pbcc)
+            remove_file(pbname + ".pb.h")
+            remove_file(pbname + ".pb.cc")
 
     def close(self):
         if not isinstance(self._target_db, dict):
@@ -912,16 +933,11 @@ class Bukit:
             with Storage("r") as s:
                 path, protos, output = s.path(), s.protos(), s.output()
 
-            if os.path.exists(makefile):
-                os.remove(makefile)
-
+            remove_file(makefile)
             for proto in protos or ():
                 pbname, _ = os.path.splitext(proto)
-                pbh, pbcc = pbname + ".pb.h", pbname + ".pb.cc"
-                if os.path.exists(pbh):
-                    os.remove(pbh)
-                if os.path.exists(pbcc):
-                    os.remove(pbcc)
+                remove_file(pbname + ".pb.h")
+                remove_file(pbname + ".pb.cc")
             if output:
                 shutil.rmtree(output, True)
             shutil.rmtree(path, True)
