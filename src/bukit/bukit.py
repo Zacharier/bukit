@@ -138,15 +138,24 @@ class Flags(list):
     def __str__(self):
         return " ".join(iter(self))
 
+    def __repr__(self):
+        return "<Flags " + list.__repr__(self) + ">"
+
 
 class LdLibs(list):
     def __str__(self):
         return break_str(iter(self))
 
+    def __repr__(self):
+        return "<LdLibs " + list.__repr__(self) + ">"
+
 
 class Includes(list):
     def __str__(self):
         return " ".join(("-I %s" % arg for arg in iter(self)))
+
+    def __repr__(self):
+        return "<Includes " + list.__repr__(self) + ">"
 
 
 class Scope(dict):
@@ -154,16 +163,40 @@ class Scope(dict):
     A extended dict.
     """
 
-    def __init__(self, d):
-        dict.__init__(self, d)
+    def __init__(self):
+        dict.__init__(self)
 
-    def extend(self, parent):
-        for key, val in parent.items():
-            child_val = self.get(key)
-            if isinstance(child_val, list):
-                child_val.extend(val)
-            elif child_val is None:
+    def update(self, new=None, **kwargs):
+        for d in (new or {}, kwargs):
+            for key, val in d.items():
+                if val is not None:
+                    self[key] = val
+
+    def extend(self, base):
+        for key, val in base.items():
+            sub_val = self.get(key)
+            if isinstance(sub_val, list):
+                sub_val.extend(val)
+            elif sub_val is None:
                 self[key] = val
+
+    def __getattr__(self, key):
+        try:
+            return self[key]
+        except KeyError as k:
+            raise AttributeError(k)
+
+    def __setattr__(self, key, value):
+        self[key] = value
+
+    def __delattr__(self, key):
+        try:
+            del self[key]
+        except KeyError as k:
+            raise AttributeError(k)
+
+    def __repr__(self):
+        return "<Scope " + dict.__repr__(self) + ">"
 
 
 class MakeRule:
@@ -189,6 +222,10 @@ class MakeRule:
 
     def __str__(self):
         raise NotImplementedError
+
+    def __repr__(self):
+        d = {"target": self._target, "prereqs": self._prereqs, "command": self._command}
+        return "<%s %s>" % (type(self).__name__, str(d))
 
 
 class PhonyRule(MakeRule):
@@ -526,7 +563,7 @@ class Module:
         self._protos = {}
         self._artifacts = []
         self._phonies = ["all", "clean"]
-        self._vars = {}
+        self._scope = Scope()
         self.config(
             cc="cc",
             cxx="c++",
@@ -552,18 +589,18 @@ class Module:
         ldflags=None,
         ldlibs=None,
     ):
-        settings = {}
+        scope = Scope()
         if optimize is not None:
             if isinstance(optimize, bool):
-                settings["optimize"] = "-O3" if optimize is True else "-O0"
+                scope["optimize"] = "-O3" if optimize is True else "-O0"
             else:
-                settings["optimize"] = optimize
+                scope["optimize"] = optimize
         if incs is not None:
-            settings["incs"] = Includes(incs)
+            scope["incs"] = Includes(incs)
         if cflags is not None:
-            settings["cflags"] = Flags(cflags)
+            scope["cflags"] = Flags(cflags)
         if cxxflags is not None:
-            settings["cxxflags"] = Flags(cxxflags)
+            scope["cxxflags"] = Flags(cxxflags)
         if ldflags is not None:
             flags = Flags()
             libs = LdLibs()
@@ -573,32 +610,21 @@ class Module:
                     flags.append(ldflag)
                 else:
                     libs.append(ldflag)
-            settings["ldflags"] = flags
+            scope["ldflags"] = flags
             if libs:
-                settings["ldlibs"] = libs
+                scope["ldlibs"] = libs
         if ldlibs is not None:
-            settings["ldlibs"] = LdLibs(ldlibs + settings.get("lidlibs", []))
-        return settings
+            scope["ldlibs"] = LdLibs(ldlibs + scope.get("lidlibs", []))
+        return scope
 
     def config(
         self, cc=None, cxx=None, protoc=None, ccache=None, output=None, **settings
     ):
-        for name, val in [
-            ("cc", cc),
-            ("cxx", cxx),
-            ("ccache", ccache),
-            ("protoc", protoc),
-            ("output", output),
-        ]:
-            if val is not None:
-                self._vars[name] = val
-        self._vars.update(self._sanitize(**settings))
+        self._scope.update(cc=cc, cxx=cxx, protoc=protoc, ccache=ccache, output=output)
+        self._scope.update(self._sanitize(**settings))
 
     def output(self):
-        return self._vars["output"]
-
-    def protoc(self):
-        return self._vars["protoc"]
+        return self._scope.output
 
     def _add_artifact(self, cls, name, srcs, deps, protos, kwargs):
         sources = globs(srcs)
@@ -606,8 +632,8 @@ class Module:
         sources.extend([proto.replace(".proto", ".pb.cc") for proto in protobufs])
         assert sources, "no matched files were found in: %s" % name
         self._protos[name] = protobufs
-        scope = Scope(self._sanitize(**kwargs))
-        scope.extend(self._vars)
+        scope = self._sanitize(**kwargs)
+        scope.extend(self._scope)
         artifact = cls(self._ctx, name, sources, deps, scope)
         self._ctx.declare(name, deps)
         self._artifacts.append(artifact)
@@ -628,7 +654,7 @@ class Module:
         self._add_artifact(PrebuiltLibrary, name, srcs, (), (), kwargs)
 
     def _generate(self, protos):
-        for proto in set(protos):
+        for proto in sorted(set(protos)):
             pbname, _ = os.path.splitext(proto)
             pbh, pbcc = pbname + ".pb.h", pbname + ".pb.cc"
             if os.path.exists(pbh) and os.path.exists(pbcc):
@@ -643,7 +669,7 @@ class Module:
                 ["--proto_path " + proto_dir for proto_dir in proto_dirs]
             )
             cmd = "%s %s --cpp_out=%s %s" % (
-                self.protoc(),
+                self._scope.protoc,
                 proto_paths,
                 os.path.dirname(proto),
                 proto,
