@@ -1025,8 +1025,8 @@ def do_args():
 
 
 def main():
-    say(LOGO)
     args = do_args()
+    say(LOGO)
     bukit = Bukit()
     if args.command == "create":
         bukit.create(args)
