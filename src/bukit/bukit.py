@@ -774,7 +774,7 @@ class Template(object):
     Build Template which generates a BUILD file.
     """
 
-    def format(self, name):
+    def format(self, name=None):
         lines = [
             "config(",
             '    cc="cc",',
@@ -807,7 +807,7 @@ class Template(object):
             '    srcs=["./*.cc", "./*.cpp", "src/*.cc", "src/*.cpp"],',
             ")",
         ]
-        return "\n".join(lines) % name
+        return "\n".join(lines) % (name or "app")
 
 
 class Storage(object):
@@ -927,7 +927,7 @@ class Bukit(object):
             s.save(module.output(), protos, rules_table)
 
         say("make...")
-        cmd = "make %s" % options.name or "all"
+        cmd = "make %s" % (options.name or "all")
         if options.jobs is not None:
             cmd += " -j %s" % options.jobs
         say(cmd, color="yellow")
@@ -986,7 +986,7 @@ def do_args():
         sub_parser.add_argument(
             "--name",
             type=str,
-            default="app",
+            default=None,
             required=False,
             help="artifact name. eg: app",
         )
