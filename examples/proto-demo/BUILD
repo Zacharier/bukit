@@ -22,11 +22,16 @@ config(
     ldflags=["-L/usr/local/lib"],
 )
 
+library(
+    name="pbs",
+    protos=["protos/*.proto"],
+    shared=True,
+)
 
 binary(
     name="app",
     incs=["./", "src/"],
     srcs=["src/*.cc", "src/*.cpp"],
-    protos=["protos/*.proto"],
+    deps=["pbs"],
     ldflags=["-lprotobuf"],
 )

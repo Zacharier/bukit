@@ -24,7 +24,7 @@ config(
 
 library(
     name="foo",
-    incs="src",
+    incs=["src"],
     srcs=[
         "src/foo.cc",
     ],
@@ -32,7 +32,7 @@ library(
 
 library(
     name="bar",
-    incs="src",
+    incs=["src"],
     srcs=[
         "src/bar.cc",
     ],
