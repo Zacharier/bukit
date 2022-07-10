@@ -33,6 +33,7 @@ import time
 import subprocess
 import codecs
 import argparse
+import traceback
 
 __version__ = "1.0.0"
 
@@ -119,7 +120,7 @@ def subcall(cmd, stdout=sys.stdout, stderr=sys.stderr, exit_on_error=True):
     """
     Fork and execute a new command.
     """
-    p = subprocess.Popen(cmd, shell=True, stdout=stdout)
+    p = subprocess.Popen(cmd, shell=True, stdout=stdout, stderr=stderr)
     out, err = p.communicate()
     r = p.wait()
     if r != 0 and exit_on_error:
@@ -892,77 +893,72 @@ class Storage(object):
         self.close()
 
 
-class Bukit(object):
-    """
-    Collect all of rules and generate a makefile file.
-    """
+def create(options):
+    say("create...")
+    tpl = Template()
+    content = tpl.format(options.name)
+    with codecs.open("BUILD", "w", encoding="utf-8") as f:
+        f.write(content)
+    say("the `BUILD` has been generated in the current directory")
 
-    def __init__(self):
-        pass
 
-    def create(self, options):
-        say("create...")
-        tpl = Template()
-        content = tpl.format(options.name)
-        with codecs.open("BUILD", "w", encoding="utf-8") as f:
-            f.write(content)
-        say("the `BUILD` has been generated in the current directory")
+def build(options):
+    def execute(path, globals):
+        with codecs.open(path, encoding="utf-8") as f:
+            code = compile(f.read(), path, "exec")
+            exec(code, globals)
 
-    def build(self, options):
-        def execute(path, globals):
-            with codecs.open(path, encoding="utf-8") as f:
-                code = compile(f.read(), path, "exec")
-                exec(code, globals)
+    say("build...")
+    module = Module()
+    module.config(optimize=options.optimize)
+    execute("BUILD", api(module))
+    protos, rules_table = module.build("Makefile", options.name)
+    with Storage("c") as s:
+        s.save(module.output(), protos, rules_table)
 
-        say("build...")
-        module = Module()
-        module.config(optimize=options.optimize)
-        execute("BUILD", api(module))
-        protos, rules_table = module.build("Makefile", options.name)
-        with Storage("c") as s:
-            s.save(module.output(), protos, rules_table)
+    say("make...")
+    cmd = "make %s" % (options.name or "all")
+    if options.jobs is not None:
+        cmd += " -j %s" % options.jobs
+    say(cmd, color="yellow")
+    subcall(cmd)
 
-        say("make...")
-        cmd = "make %s" % (options.name or "all")
-        if options.jobs is not None:
-            cmd += " -j %s" % options.jobs
-        say(cmd, color="yellow")
-        subcall(cmd)
 
-    def run(self, options):
-        self.build(options)
+def run(options):
+    build(options)
+    with Storage("r") as s:
+        targets = s.query(options.name, mode=os.X_OK)
+    if len(targets) != 1:
+        assert options.name is not None, "a name must be specified by command args"
+        assert options.name is None, "unknown name: %s" % options.name
+    say("run...")
+    cmd = targets[0]
+    if options.args:
+        cmd += " " + options.args
+    say(cmd, color="yellow")
+    subcall(cmd)
+
+
+def clean(options):
+    say("clean...")
+    makefile = "Makefile"
+    if not options.all:
+        if os.path.exists(makefile):
+            cmd = "make clean"
+            say(cmd, color="yellow")
+            subcall(cmd, sys.stdout)
+    else:
         with Storage("r") as s:
-            targets = s.query(options.name, mode=os.X_OK)
-        if len(targets) != 1:
-            assert options.name is not None, "a name must be specified by command args"
-            assert options.name is None, "unknown name: %s" % options.name
-        say("run...")
-        cmd = targets[0]
-        if options.args:
-            cmd += " " + options.args
-        say(cmd, color="yellow")
-        subcall(cmd)
+            path, protos, output = s.path(), s.protos(), s.output()
 
-    def clean(self, options):
-        say("clean...")
-        makefile = "Makefile"
-        if not options.all:
-            if os.path.exists(makefile):
-                cmd = "make clean"
-                say(cmd, color="yellow")
-                subcall(cmd, sys.stdout)
-        else:
-            with Storage("r") as s:
-                path, protos, output = s.path(), s.protos(), s.output()
-
-            remove_file(makefile)
-            for proto in protos or ():
-                pbname, _ = os.path.splitext(proto)
-                remove_file(pbname + ".pb.h")
-                remove_file(pbname + ".pb.cc")
-            if output:
-                shutil.rmtree(output, True)
-            shutil.rmtree(path, True)
+        remove_file(makefile)
+        for proto in protos or ():
+            pbname, _ = os.path.splitext(proto)
+            remove_file(pbname + ".pb.h")
+            remove_file(pbname + ".pb.cc")
+        if output:
+            shutil.rmtree(output, True)
+        shutil.rmtree(path, True)
 
 
 def do_args():
@@ -1023,15 +1019,24 @@ def do_args():
 def main():
     args = do_args()
     say(LOGO)
-    bukit = Bukit()
-    if args.command == "create":
-        bukit.create(args)
-    elif args.command == "build":
-        bukit.build(args)
-    elif args.command == "run":
-        bukit.run(args)
-    elif args.command == "clean":
-        bukit.clean(args)
+    try:
+        if args.command == "create":
+            create(args)
+        elif args.command == "build":
+            build(args)
+        elif args.command == "run":
+            run(args)
+        elif args.command == "clean":
+            clean(args)
+    except Exception as e:
+        tb = traceback.format_exc()
+        matcher = re.search(r'File "BUILD", line (\d+)', tb, re.M)
+        if matcher is None:
+            s = "[ERROR]"
+        else:
+            s = "[BUILD:%s]" % matcher.group(1)
+        say("%s %s", s, str(e), color="red")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
