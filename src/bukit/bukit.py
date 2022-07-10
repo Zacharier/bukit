@@ -134,28 +134,43 @@ class ArgsParser(argparse.ArgumentParser):
         sys.exit(2)
 
 
-class Flags(list):
+class BreakList(list):
     def __str__(self):
         return " ".join(iter(self))
 
     def __repr__(self):
-        return "<Flags " + list.__repr__(self) + ">"
+        return "<%s %s>" % (type(self).__name__, list.__repr__(self))
 
 
-class LdLibs(list):
+class Includes(BreakList):
     def __str__(self):
-        return break_str(iter(self))
-
-    def __repr__(self):
-        return "<LdLibs " + list.__repr__(self) + ">"
+        return " ".join(("-I%s" % arg for arg in iter(self)))
 
 
-class Includes(list):
+class Depends(BreakList):
     def __str__(self):
-        return " ".join(("-I %s" % arg for arg in iter(self)))
+        if sys.platform == "darwin":  # OS X
+            fmt = " -Xlinker %s"
+        else:
+            fmt = ' -Xlinker "-(" %s -Xlinker "-)"'
+        return fmt % break_str(iter(self))
 
-    def __repr__(self):
-        return "<Includes " + list.__repr__(self) + ">"
+
+class Flags(BreakList):
+    def __str__(self):
+        return " ".join(iter(self))
+
+
+class LdLibs(BreakList):
+    pass
+
+
+class Flags(BreakList):
+    pass
+
+
+class Objs(BreakList):
+    pass
 
 
 class Scope(dict):
@@ -306,19 +321,12 @@ class ElfRule(FileMakeRule):
     Generate a rule which links some object files.
     """
 
-    def __init__(self, target, objs, libs, shared, kwargs):
+    def __init__(self, target, shared, kwargs):
         kwargs["target"] = target
-        kwargs["objs"] = break_str(objs)
         kwargs["shared"] = "-shared" if shared else ""
-        fmt = "%(ccache)s %(cxx)s %(shared)s -o %(target)s %(objs)s %(ldflags)s"
-        kwargs["ldlibs"].extend(libs)
-        if kwargs["ldlibs"]:
-            if sys.platform == "darwin":  # OS X
-                fmt += " -Xlinker %(ldlibs)s"
-            else:
-                fmt += ' -Xlinker "-(" %(ldlibs)s -Xlinker "-)"'
+        fmt = "%(ccache)s %(cxx)s %(shared)s -o %(target)s %(objs)s %(ldflags)s %(deps)s %(ldlibs)s"
         command = fmt % kwargs
-        FileMakeRule.__init__(self, target, objs + libs, command)
+        FileMakeRule.__init__(self, target, kwargs["objs"] + kwargs["deps"], command)
 
 
 class BinaryRule(ElfRule):
@@ -326,9 +334,9 @@ class BinaryRule(ElfRule):
     Generate a rule which links some object files.
     """
 
-    def __init__(self, name, objs, libs, kwargs):
+    def __init__(self, name, kwargs):
         target = os.path.join(kwargs["output"], "bin", name)
-        ElfRule.__init__(self, target, objs, libs, False, kwargs)
+        ElfRule.__init__(self, target, False, kwargs)
 
 
 class TestRule(ElfRule):
@@ -336,9 +344,9 @@ class TestRule(ElfRule):
     Generate a rule which links some object files.
     """
 
-    def __init__(self, name, objs, libs, kwargs):
+    def __init__(self, name, kwargs):
         target = os.path.join(kwargs["output"], "test", name)
-        ElfRule.__init__(self, target, objs, libs, False, kwargs)
+        ElfRule.__init__(self, target, False, kwargs)
 
 
 class SharedRule(ElfRule):
@@ -346,9 +354,9 @@ class SharedRule(ElfRule):
     Generate a rule which links some object files to a Shared Object file.
     """
 
-    def __init__(self, name, objs, libs, kwargs):
+    def __init__(self, name, kwargs):
         target = os.path.join(kwargs["output"], "lib", "lib%s.so" % name)
-        ElfRule.__init__(self, target, objs, libs, True, kwargs)
+        ElfRule.__init__(self, target, True, kwargs)
 
 
 class StaticRule(FileMakeRule):
@@ -356,12 +364,11 @@ class StaticRule(FileMakeRule):
     Generate a rule which archive some object files to an archived file.
     """
 
-    def __init__(self, name, objs, kwargs):
+    def __init__(self, name, kwargs):
         target = os.path.join(kwargs["output"], "lib", "lib%s.a" % name)
         kwargs["target"] = target
-        kwargs["objs"] = break_str(objs)
         command = "ar rcs %(target)s %(objs)s" % kwargs
-        FileMakeRule.__init__(self, target, objs, command)
+        FileMakeRule.__init__(self, target, kwargs["objs"], command)
 
 
 class PrebuiltRule(FileMakeRule):
@@ -390,22 +397,22 @@ class Context(object):
     def declare(self, name, deps):
         assert name not in self._symbol_table, "`%s` is already declared" % name
         dep_list = list(deps)
-        for dep_name in deps:
-            child_deps = self._symbol_table.get(dep_name)
-            assert child_deps is not None, "`%s` was not found" % dep_name
+        for dep in deps:
+            child_deps = self._symbol_table.get(dep)
+            assert child_deps is not None, "`%s` was not found" % dep
             dep_list.extend(child_deps)
-
         self._symbol_table[name] = dep_list
 
     def deps_of(self, name):
-        return self._symbol_table[name]
+        return self._symbol_table.get(name, [])
 
-    def define(self, name, target):
+    def define(self, name, *args):
         assert name not in self._artifact_table, "`%s` is already defined" % name
-        self._artifact_table[name] = target
+        self._artifact_table[name] = args
 
     def resolve(self, name):
-        return self._artifact_table.get(name)
+        assert name in self._artifact_table, "undefined dep: %s" % name
+        return self._artifact_table[name]
 
 
 class Artifact(object):
@@ -420,8 +427,6 @@ class Artifact(object):
         self._name = name
         self._srcs = srcs
         self._deps = deps
-        self._objs = []
-        self._libs = []
         self._kwargs = kwargs
 
     def name(self):
@@ -480,59 +485,60 @@ class Artifact(object):
         raise NotImplementedError
 
     def build(self):
+        def resolve_deps():
+            deps = Depends()
+            for dep in self._deps:
+                target, _, _ = self._ctx.resolve(dep)
+                deps.append(target)
+            return deps
+
+        def collect_libs(libs):
+            seen = set(libs)
+
+            def dfs(name):
+                _, deps, libs = self._ctx.resolve(name)
+                for lib in libs:
+                    if lib not in seen:
+                        ldlibs.append(lib)
+                for dep in deps:
+                    dfs(dep)
+
+            ldlibs = LdLibs(libs)
+            for dep in self._deps:
+                dfs(dep)
+            return ldlibs
+
         obj_rules = self._build_objs()
-        self._objs.extend([rule.target() for rule in obj_rules])
-        for dep in self._deps:
-            target = self._ctx.resolve(dep)
-            assert target, "unrecognized deps: %s" % dep
-            self._libs.append(target)
+        self._kwargs["objs"] = Objs([rule.target() for rule in obj_rules])
+        self._kwargs["deps"] = resolve_deps()
+        self._kwargs["ldlibs"] = collect_libs(self._kwargs["ldlibs"])
         rule = self._build_out()
-        self._ctx.define(self._name, rule.target())
+        self._ctx.define(self._name, rule.target(), self._deps, self._kwargs["ldlibs"])
         nop_rule = NoRecipeRule(self._name, [rule.target()])
         return [nop_rule, rule] + obj_rules
 
 
 class Binary(Artifact):
-    """
-    Binary file.
-    """
-
     def _build_out(self):
-        return BinaryRule(self._name, self._objs, self._libs, self._kwargs)
+        return BinaryRule(self._name, self._kwargs)
 
 
 class Test(Artifact):
-    """
-    Unit Test.
-    """
-
     def _build_out(self):
-        return TestRule(self._name, self._objs, self._libs, self._kwargs)
+        return TestRule(self._name, self._kwargs)
 
 
 class SharedLibrary(Artifact):
-    """
-    Shared Object.
-    """
-
     def _build_out(self):
-        return SharedRule(self._name, self._objs, self._libs, self._kwargs)
+        return SharedRule(self._name, self._kwargs)
 
 
 class StaticLibrary(Artifact):
-    """
-    Static Libary
-    """
-
     def _build_out(self):
-        return StaticRule(self._name, self._objs, self._kwargs)
+        return StaticRule(self._name, self._kwargs)
 
 
 class PrebuiltLibrary(Artifact):
-    """
-    Prebuilt(shared) Libary
-    """
-
     def _build_objs(self):
         return []
 
@@ -544,8 +550,8 @@ class PrebuiltLibrary(Artifact):
                 if os.path.exists(path):
                     return path
 
-        lib_path = find_lib(".so") or find_lib(".a")
-        assert lib_path, "lib%s.so or lib%s.a was not found in: %s" % (
+        lib_path = find_lib(".a") or find_lib(".so")
+        assert lib_path, "lib%s.a or lib%s.so was not found in: %s" % (
             self._name,
             self._name,
             self._srcs,
@@ -602,19 +608,9 @@ class Module(object):
         if cxxflags is not None:
             scope["cxxflags"] = Flags(cxxflags)
         if ldflags is not None:
-            flags = Flags()
-            libs = LdLibs()
-            for ldflag in ldflags:
-                ldflag = ldflag.strip()
-                if ldflag.startswith("-") and not ldflag.startswith("-l"):
-                    flags.append(ldflag)
-                else:
-                    libs.append(ldflag)
-            scope["ldflags"] = flags
-            if libs:
-                scope["ldlibs"] = libs
+            scope["ldflags"] = Flags(ldflags)
         if ldlibs is not None:
-            scope["ldlibs"] = LdLibs(ldlibs + scope.get("lidlibs", []))
+            scope["ldlibs"] = LdLibs(ldlibs)
         return scope
 
     def config(
@@ -647,11 +643,11 @@ class Module(object):
     def add_shared(self, name, srcs, deps, protos, kwargs):
         self._add_artifact(SharedLibrary, name, srcs, deps, protos, kwargs)
 
-    def add_static(self, name, srcs, protos, kwargs):
-        self._add_artifact(StaticLibrary, name, srcs, (), protos, kwargs)
+    def add_static(self, name, srcs, deps, protos, kwargs):
+        self._add_artifact(StaticLibrary, name, srcs, deps, protos, kwargs)
 
-    def add_prebuilt(self, name, srcs, kwargs):
-        self._add_artifact(PrebuiltLibrary, name, srcs, (), (), kwargs)
+    def add_prebuilt(self, name, srcs, deps, kwargs):
+        self._add_artifact(PrebuiltLibrary, name, srcs, deps, (), kwargs)
 
     def _generate(self, protos):
         for proto in sorted(set(protos)):
@@ -760,11 +756,11 @@ def api(module):
         name, srcs=(), protos=(), deps=(), shared=False, prebuilt=False, **kwargs
     ):
         if prebuilt:
-            module.add_prebuilt(name, srcs, kwargs)
+            module.add_prebuilt(name, srcs, deps, kwargs)
         elif shared:
             module.add_shared(name, srcs, deps, protos, kwargs)
         else:
-            module.add_static(name, srcs, protos, kwargs)
+            module.add_static(name, srcs, deps, protos, kwargs)
 
     return dict(locals(), **{name.upper(): func for name, func in locals().items()})
 
