@@ -148,15 +148,6 @@ class Includes(BreakList):
         return " ".join(("-I%s" % arg for arg in iter(self)))
 
 
-class Depends(BreakList):
-    def __str__(self):
-        if sys.platform == "darwin":  # OS X
-            fmt = " -Xlinker %s"
-        else:
-            fmt = ' -Xlinker "-(" %s -Xlinker "-)"'
-        return fmt % break_str(iter(self))
-
-
 class Flags(BreakList):
     def __str__(self):
         return " ".join(iter(self))
@@ -173,7 +164,11 @@ class Flags(BreakList):
 class Objs(BreakList):
     pass
 
+ 
+class Depends(BreakList):
+    pass
 
+ 
 class Scope(dict):
     """
     A extended dict.
@@ -325,7 +320,7 @@ class ElfRule(FileMakeRule):
     def __init__(self, target, shared, kwargs):
         kwargs["target"] = target
         kwargs["shared"] = "-shared" if shared else ""
-        fmt = "%(ccache)s %(cxx)s %(shared)s -o %(target)s %(objs)s %(ldflags)s %(deps)s %(ldlibs)s"
+        fmt = "%(ccache)s %(cxx)s %(shared)s -o %(target)s %(objs)s %(ldflags)s -Xlinker "-(" %(deps)s %(ldlibs)s -Xlinker "-)""
         command = fmt % kwargs
         FileMakeRule.__init__(self, target, kwargs["objs"] + kwargs["deps"], command)
 
