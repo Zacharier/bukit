@@ -320,7 +320,7 @@ class ElfRule(FileMakeRule):
     def __init__(self, target, shared, kwargs):
         kwargs["target"] = target
         kwargs["shared"] = "-shared" if shared else ""
-        fmt = "%(ccache)s %(cxx)s %(shared)s -o %(target)s %(objs)s %(ldflags)s -Xlinker "-(" %(deps)s %(ldlibs)s -Xlinker "-)""
+        fmt = '%(ccache)s %(cxx)s %(shared)s -o %(target)s %(objs)s %(ldflags)s -Xlinker "-(" %(deps)s %(ldlibs)s -Xlinker "-)"'
         command = fmt % kwargs
         FileMakeRule.__init__(self, target, kwargs["objs"] + kwargs["deps"], command)
 
